@@ -176,22 +176,38 @@ if __name__ == '__main__':
             dual_gripper_action_array = Array('d', 2, lock=False)  # current left, right gripper action(2) data.
             gripper_ctrl = Dex1_1_Gripper_Controller(left_gripper_value, right_gripper_value, dual_gripper_data_lock, 
                                                      dual_gripper_state_array, dual_gripper_action_array, simulation_mode=args.sim)
-        elif args.ee == "inspire_dfx":
-            from teleop.robot_control.robot_hand_inspire import Inspire_Controller_DFX
-            left_hand_pos_array = Array('d', 75, lock = True)      # [input]
-            right_hand_pos_array = Array('d', 75, lock = True)     # [input]
-            dual_hand_data_lock = Lock()
-            dual_hand_state_array = Array('d', 12, lock = False)   # [output] current left, right hand state(12) data.
-            dual_hand_action_array = Array('d', 12, lock = False)  # [output] current left, right hand action(12) data.
-            hand_ctrl = Inspire_Controller_DFX(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
-        elif args.ee == "inspire_ftp":
-            from teleop.robot_control.robot_hand_inspire import Inspire_Controller_FTP
-            left_hand_pos_array = Array('d', 75, lock = True)      # [input]
-            right_hand_pos_array = Array('d', 75, lock = True)     # [input]
-            dual_hand_data_lock = Lock()
-            dual_hand_state_array = Array('d', 12, lock = False)   # [output] current left, right hand state(12) data.
-            dual_hand_action_array = Array('d', 12, lock = False)  # [output] current left, right hand action(12) data.
-            hand_ctrl = Inspire_Controller_FTP(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
+        elif args.ee == "inspire_dfx" or args.ee == "inspire_ftp":
+            if args.input_mode == "controller":
+                # 1DOF mode: controller trigger → single grip value
+                from teleop.robot_control.robot_hand_inspire import Inspire_1DOF_Controller
+                left_gripper_value = Value('d', 10.0, lock=True)         # [input] init OPEN (safety)
+                right_gripper_value = Value('d', 10.0, lock=True)        # [input] init OPEN (safety)
+                dual_gripper_data_lock = Lock()
+                dual_gripper_state_array = Array('d', 2, lock=False)     # [output] [left_state, right_state]
+                dual_gripper_action_array = Array('d', 2, lock=False)    # [output] [left_action, right_action]
+                gripper_ctrl = Inspire_1DOF_Controller(
+                    left_gripper_value, right_gripper_value, dual_gripper_data_lock,
+                    dual_gripper_state_array, dual_gripper_action_array,
+                    protocol="dfx" if args.ee == "inspire_dfx" else "ftp",
+                    simulation_mode=args.sim)
+            else:
+                # Full 6DOF hand tracking mode (existing code)
+                if args.ee == "inspire_dfx":
+                    from teleop.robot_control.robot_hand_inspire import Inspire_Controller_DFX
+                    left_hand_pos_array = Array('d', 75, lock = True)
+                    right_hand_pos_array = Array('d', 75, lock = True)
+                    dual_hand_data_lock = Lock()
+                    dual_hand_state_array = Array('d', 12, lock = False)
+                    dual_hand_action_array = Array('d', 12, lock = False)
+                    hand_ctrl = Inspire_Controller_DFX(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
+                else:  # inspire_ftp
+                    from teleop.robot_control.robot_hand_inspire import Inspire_Controller_FTP
+                    left_hand_pos_array = Array('d', 75, lock = True)
+                    right_hand_pos_array = Array('d', 75, lock = True)
+                    dual_hand_data_lock = Lock()
+                    dual_hand_state_array = Array('d', 12, lock = False)
+                    dual_hand_action_array = Array('d', 12, lock = False)
+                    hand_ctrl = Inspire_Controller_FTP(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
         elif args.ee == "brainco":
             from teleop.robot_control.robot_hand_brainco import Brainco_Controller
             left_hand_pos_array = Array('d', 75, lock = True)      # [input]
@@ -288,7 +304,7 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
-            if (args.ee == "dex3" or args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
+            if (args.ee == "dex3" or args.ee == "brainco") and args.input_mode == "hand":
                 with left_hand_pos_array.get_lock():
                     left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
                 with right_hand_pos_array.get_lock():
@@ -303,6 +319,16 @@ if __name__ == '__main__':
                     left_gripper_value.value = tele_data.left_hand_pinchValue
                 with right_gripper_value.get_lock():
                     right_gripper_value.value = tele_data.right_hand_pinchValue
+            elif (args.ee == "inspire_dfx" or args.ee == "inspire_ftp") and args.input_mode == "hand":
+                with left_hand_pos_array.get_lock():
+                    left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
+                with right_hand_pos_array.get_lock():
+                    right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
+            elif (args.ee == "inspire_dfx" or args.ee == "inspire_ftp") and args.input_mode == "controller":
+                with left_gripper_value.get_lock():
+                    left_gripper_value.value = tele_data.left_ctrl_triggerValue
+                with right_gripper_value.get_lock():
+                    right_gripper_value.value = tele_data.right_ctrl_triggerValue
             else:
                 pass
             
@@ -367,6 +393,14 @@ if __name__ == '__main__':
                         right_ee_state = dual_hand_state_array[-6:]
                         left_hand_action = dual_hand_action_array[:6]
                         right_hand_action = dual_hand_action_array[-6:]
+                        current_body_state = []
+                        current_body_action = []
+                elif (args.ee == "inspire_dfx" or args.ee == "inspire_ftp") and args.input_mode == "controller":
+                    with dual_gripper_data_lock:
+                        left_ee_state = [dual_gripper_state_array[0]]
+                        right_ee_state = [dual_gripper_state_array[1]]
+                        left_hand_action = [dual_gripper_action_array[0]]
+                        right_hand_action = [dual_gripper_action_array[1]]
                         current_body_state = []
                         current_body_action = []
                 else:
