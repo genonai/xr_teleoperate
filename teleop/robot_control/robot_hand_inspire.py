@@ -490,7 +490,7 @@ class Inspire_1DOF_Controller:
                 right_state_avg = np.mean(np.array(right_hand_state_array[:]))
 
                 # Write to shared arrays
-                if dual_gripper_state_out is not None and dual_gripper_data_lock is not None:
+                if dual_gripper_data_lock is not None and dual_gripper_state_out is not None and dual_gripper_action_out is not None:
                     with dual_gripper_data_lock:
                         dual_gripper_state_out[0] = left_state_avg
                         dual_gripper_state_out[1] = right_state_avg
