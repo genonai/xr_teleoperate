@@ -404,6 +404,61 @@ def test_state_flatten_order_is_arm_then_hand_left_then_right(
 
 
 # ---------------------------------------------------------------------------
+# hot-path / worker-thread isolation
+# ---------------------------------------------------------------------------
+
+
+def test_rerun_logging_runs_on_worker_thread_not_hot_path(
+    tmp_path: Path, dummy_inputs
+):
+    """Rerun IPC must not block ``add_item``. If it were inline, 5 frames
+    would take 5*SLOW_MS >> the 60 Hz budget. Since it's on the worker
+    thread, ``add_item`` should return near-instantly."""
+    colors, states, actions = dummy_inputs
+
+    SLOW_MS = 50  # would blow a 16.67 ms budget by 3x if inline
+
+    class _SlowRerun:
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        def log_item_data(self, data: dict) -> None:
+            self.calls.append(int(data["idx"]))
+            time.sleep(SLOW_MS / 1000.0)
+
+    # Construct with rerun_log=False so __init__ doesn't try to import
+    # the real RerunLogger; then inject a fake and re-enable the flag.
+    w = _make_writer(tmp_path, rerun_log=False)
+    fake = _SlowRerun()
+    w._rerun_logger = fake
+    w.rerun_log = True
+
+    w.create_episode()
+
+    N = 5
+    t0 = time.monotonic()
+    for _ in range(N):
+        w.add_item(colors=colors, states=states, actions=actions)
+    hot_path_sec = time.monotonic() - t0
+
+    # If Rerun were inline, this would be >= N * SLOW_MS = 250 ms.
+    # Off-hot-path, it should be well under one SLOW_MS interval.
+    budget_sec = (SLOW_MS / 1000.0) * 0.5
+    assert hot_path_sec < budget_sec, (
+        f"add_item appears to block on Rerun: {hot_path_sec*1000:.1f} ms "
+        f"for {N} calls (budget {budget_sec*1000:.1f} ms)"
+    )
+
+    # save_episode waits for the worker to drain, so by the time it returns
+    # all N rerun calls should have completed.
+    assert w.save_episode() is True
+    assert fake.calls == list(range(N)), (
+        f"worker did not process all rerun items: {fake.calls}"
+    )
+    w.close()
+
+
+# ---------------------------------------------------------------------------
 # constants sanity
 # ---------------------------------------------------------------------------
 

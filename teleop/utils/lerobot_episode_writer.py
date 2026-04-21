@@ -256,8 +256,18 @@ class LeRobotEpisodeWriter:
         self._ts_buf[idx] = time.monotonic() - self._ep_start_time
         self._n_frames = idx + 1
 
+        # Pack a 4-tuple so the worker thread can handle both the ffmpeg pipe
+        # and Rerun logging off the 60 Hz hot path. Rerun IPC can spike
+        # unpredictably (shared-memory ring buffer or not) — keeping it out
+        # of add_item is what preserves the 16.67 ms budget.
+        #
+        # Caller contract (matches existing EpisodeWriter): do not mutate
+        # `states` / `actions` between this call and the next teleop
+        # iteration; we queue references, not deep copies.
         try:
-            self._frame_queue.put_nowait(frame)
+            self._frame_queue.put_nowait(
+                (frame, states, actions, self.item_id)
+            )
         except queue.Full:
             # Roll back the row we just wrote — the abort will discard the
             # buffers anyway, but this preserves the invariant for unit tests.
@@ -267,19 +277,6 @@ class LeRobotEpisodeWriter:
                 f"ffmpeg fell >{DEFAULT_QUEUE_HEADROOM_SEC}s behind"
             )
             return
-
-        if self.rerun_log and self._rerun_logger is not None:
-            try:
-                self._rerun_logger.log_item_data(
-                    {
-                        "idx": self.item_id,
-                        "colors": {DEFAULT_CAMERA_INCOMING_KEY: frame},
-                        "states": states,
-                        "actions": actions,
-                    }
-                )
-            except Exception as e:
-                logger_mp.debug(f"rerun log_item_data failed: {e}")
 
     def save_episode(self) -> bool:
         """Finalize current episode. Returns True on success, False on abort."""
@@ -424,11 +421,15 @@ class LeRobotEpisodeWriter:
         return True
 
     def _worker_loop(self) -> None:
-        """Pull frames from the bounded queue and pipe them to ffmpeg.
+        """Drain the bounded queue; pipe frames to ffmpeg and log to Rerun.
 
-        Sets ``self._worker_error`` on any I/O failure and exits. The main
-        thread is responsible for teardown — worker never mutates dirs or
-        spawns/joins other threads.
+        Both ffmpeg piping and Rerun logging run here — off the 60 Hz hot
+        path — to keep ``add_item`` to pure memory writes + ``put_nowait``.
+
+        Sets ``self._worker_error`` on any ffmpeg I/O failure and exits.
+        Rerun failures are swallowed (non-fatal: observability only). The
+        main thread is responsible for teardown — worker never mutates
+        dirs or spawns/joins other threads.
         """
         assert self._ffmpeg_proc is not None
         stdin = self._ffmpeg_proc.stdin
@@ -436,16 +437,38 @@ class LeRobotEpisodeWriter:
         try:
             while True:
                 try:
-                    frame = self._frame_queue.get(timeout=0.1)
+                    item = self._frame_queue.get(timeout=0.1)
                 except queue.Empty:
                     if self._stop_worker and self._frame_queue.empty():
                         return
                     continue
+
+                frame, states, actions, item_id = item
+
+                # Primary responsibility: pipe frame to ffmpeg. Failure here
+                # corrupts the episode.
                 try:
                     stdin.write(frame.tobytes())
                 except (BrokenPipeError, OSError) as e:
                     self._worker_error = e
                     return
+
+                # Off-hot-path observability: Rerun logging. Never allowed
+                # to fail the episode — catch and log at DEBUG only.
+                if self.rerun_log and self._rerun_logger is not None:
+                    try:
+                        self._rerun_logger.log_item_data(
+                            {
+                                "idx": item_id,
+                                "colors": {DEFAULT_CAMERA_INCOMING_KEY: frame},
+                                "states": states,
+                                "actions": actions,
+                            }
+                        )
+                    except Exception as e:
+                        logger_mp.debug(
+                            f"rerun log_item_data failed (non-fatal): {e}"
+                        )
         except Exception as e:
             self._worker_error = e
 
