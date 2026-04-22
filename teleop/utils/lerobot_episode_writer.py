@@ -230,10 +230,20 @@ class LeRobotEpisodeWriter:
             )
             return
 
-        # Flatten 26D state + action.
+        # Commit state/action row — MUST be in lockstep with the frame push
+        # below. If put_nowait raises, we abort before the frame is queued
+        # and roll back n_frames so the (state, action, ts) buffers stay
+        # consistent with what's been sent to ffmpeg.
+        idx = self._n_frames
+
+        # Fill 26D state + action directly into preallocated buffer slices.
+        # The prior _flatten_26d() helper allocated a fresh per-frame list +
+        # numpy scratch array, contradicting the "zero hot-path allocation"
+        # invariant advertised in the spec. Writing straight into the buffer
+        # keeps the hot path free of Python-level allocations per frame.
         try:
-            state = self._flatten_26d(states, kind="state")
-            action = self._flatten_26d(actions, kind="action")
+            self._fill_26d_row(self._state_buf, idx, states, kind="state")
+            self._fill_26d_row(self._action_buf, idx, actions, kind="action")
         except (KeyError, ValueError, TypeError) as e:
             self._abort_episode(f"state/action flattening failed: {e}")
             return
@@ -252,13 +262,6 @@ class LeRobotEpisodeWriter:
             )
             return
 
-        # Commit state/action row — MUST be in lockstep with the frame push
-        # below. If put_nowait raises, we abort before the frame is queued
-        # and roll back n_frames so the (state, action, ts) buffers stay
-        # consistent with what's been sent to ffmpeg.
-        idx = self._n_frames
-        self._state_buf[idx] = state
-        self._action_buf[idx] = action
         self._ts_buf[idx] = time.monotonic() - self._ep_start_time
         self._n_frames = idx + 1
 
@@ -412,11 +415,17 @@ class LeRobotEpisodeWriter:
             str(out_path),
         ]
         try:
+            # stderr=DEVNULL: we already run ffmpeg with `-loglevel error`, and
+            # we never read from the stderr PIPE. An un-drained PIPE deadlocks
+            # ffmpeg once its stderr buffer (~64KB on Linux) fills — see
+            # review feedback on PR #2. Dropping to DEVNULL removes the
+            # deadlock vector at the cost of losing error text (we already
+            # surface ffmpeg exit code in save_episode's abort message).
             self._ffmpeg_proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
             )
         except FileNotFoundError:
             logger_mp.error("ffmpeg not found on PATH — cannot record video")
@@ -478,10 +487,20 @@ class LeRobotEpisodeWriter:
         except Exception as e:
             self._worker_error = e
 
-    def _flatten_26d(self, data: dict | None, kind: str) -> np.ndarray:
+    def _fill_26d_row(
+        self, buf: np.ndarray, idx: int, data: dict | None, kind: str
+    ) -> None:
+        """Write 26D qpos fields directly into ``buf[idx, :]``.
+
+        Validates per-part presence and dim; on failure raises KeyError /
+        ValueError / TypeError which the caller turns into an episode abort.
+        Intentionally zero-alloc on the happy path: numpy's ``buf[idx, a:b] =
+        seq`` assignment copies element-wise into the existing buffer row,
+        without materializing an intermediate concatenated array.
+        """
         if data is None:
             raise ValueError(f"{kind} is None")
-        parts: list[np.ndarray] = []
+        offset = 0
         for part_key, expected_dim in FLATTEN_PARTS:
             part = data.get(part_key)
             if part is None:
@@ -489,17 +508,24 @@ class LeRobotEpisodeWriter:
             qpos = part.get("qpos") if isinstance(part, dict) else None
             if qpos is None:
                 raise KeyError(f"{kind}.{part_key}.qpos missing")
-            arr = np.asarray(qpos, dtype=np.float32).flatten()
-            if arr.shape != (expected_dim,):
+            # Length check — lists, numpy arrays, and other sized iterables.
+            try:
+                n = len(qpos)
+            except TypeError as e:
+                raise TypeError(
+                    f"{kind}.{part_key}.qpos is not sized: {e}"
+                ) from e
+            if n != expected_dim:
                 raise ValueError(
-                    f"{kind}.{part_key}.qpos has shape {arr.shape}, "
-                    f"expected ({expected_dim},)"
+                    f"{kind}.{part_key}.qpos has length {n}, "
+                    f"expected {expected_dim}"
                 )
-            parts.append(arr)
-        flat = np.concatenate(parts)
-        if flat.shape != (26,):
-            raise ValueError(f"flattened {kind} shape {flat.shape} != (26,)")
-        return flat
+            # Direct slice assignment: numpy will cast elements to float32
+            # during the in-place copy. No Python-level array allocation.
+            buf[idx, offset : offset + expected_dim] = qpos
+            offset += expected_dim
+        if offset != 26:
+            raise ValueError(f"filled {kind} offset {offset} != 26")
 
     def _write_parquet(self, path: Path) -> None:
         """Write per-episode parquet. Consolidator repacks into v3 chunked layout."""
@@ -540,7 +566,12 @@ class LeRobotEpisodeWriter:
                 "desc": self.task_desc,
                 "steps": self.task_steps,
             },
-            "created_utc": datetime.datetime.utcnow().isoformat() + "Z",
+            # datetime.utcnow() is deprecated in Python 3.12. Use timezone-aware
+            # now(UTC) and strip the +00:00 suffix so the wire format stays
+            # "...Z" (ISO-8601 Zulu), matching the prior emission.
+            "created_utc": datetime.datetime.now(datetime.timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
             "writer_version": "1.0.0",
         }
         path.write_text(json.dumps(meta, ensure_ascii=False, indent=2))
