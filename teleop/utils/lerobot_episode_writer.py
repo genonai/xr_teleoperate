@@ -416,7 +416,8 @@ class LeRobotEpisodeWriter:
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-pix_fmt", "yuv420p",
-            "-g", "10",  # torchcodec-friendly keyframe interval (spec §4.2)
+            "-crf", "17",  # visually-lossless quality; PC2 Orin NX bench: 23% CPU, 59°C at 30fps
+            "-g", "2",  # torchcodec-friendly keyframe interval (matches JSON→LeRobot convention)
             "-an",
             str(out_path),
         ]
