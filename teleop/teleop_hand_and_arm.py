@@ -36,6 +36,8 @@ STOP           = False  # Enable to begin system exit procedure
 READY          = False  # Ready to (1) enter START state, (2) enter RECORD_RUNNING state
 RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
+PAUSED         = False  # True while [p] paused — robot holds last commanded pose
+RAMP_TICKS     = 30     # Resume blend window (1.0s @ 30Hz)
 #  -------        ---------                -----------                -----------            ---------
 #   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
 #  -------        ---------      |         -----------      |         -----------      |     ---------
@@ -47,27 +49,35 @@ RECORD_TOGGLE  = False  # Toggle recording state
 #  -------        ---------                -----------                 -----------            ---------
 #  ==> manual: when READY is True, set RECORD_TOGGLE=True to transition.
 #  --> auto  : Auto-transition after saving data.
+#
+#  [p] Pause branch (only from [Ready], not from [Recording]):
+#     [Ready]  --p-->  [Paused]  --p-->  [Resuming (ramp, RAMP_TICKS ticks)]  -->  [Ready]
+#  During [Paused]: arm re-sends frozen target, hand writes skipped, [s] rejected.
+#  During [Resuming]: alpha sweeps 1/RAMP_TICKS → 1.0, blending frozen → fresh.
 
 def on_press(key):
-    global STOP, START, RECORD_TOGGLE
+    global STOP, START, RECORD_TOGGLE, PAUSED
     if key == 'r':
         START = True
     elif key == 'q':
         START = False
         STOP = True
-    elif key == 's' and START == True:
+    elif key == 's' and START and not PAUSED:
         RECORD_TOGGLE = True
+    elif key == 'p' and START and not RECORD_RUNNING:
+        PAUSED = not PAUSED
     else:
-        logger_mp.warning(f"[on_press] {key} was pressed, but no action is defined for this key.")
+        logger_mp.warning(f"[on_press] {key} ignored (invalid in current state).")
 
 def get_state() -> dict:
     """Return current heartbeat state"""
-    global START, STOP, RECORD_RUNNING, READY
+    global START, STOP, RECORD_RUNNING, READY, PAUSED
     return {
         "START": START,
         "STOP": STOP,
         "READY": READY,
         "RECORD_RUNNING": RECORD_RUNNING,
+        "PAUSED": PAUSED,
     }
 
 if __name__ == '__main__':
