@@ -414,30 +414,115 @@ if __name__ == '__main__':
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
             if (args.ee == "dex3" or args.ee == "brainco") and args.input_mode == "hand":
-                with left_hand_pos_array.get_lock():
-                    left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
-                with right_hand_pos_array.get_lock():
-                    right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
+                new_left  = tele_data.left_hand_pos.flatten()
+                new_right = tele_data.right_hand_pos.flatten()
+                if entering_pause:
+                    frozen_hand_snapshot['left']  = last_commanded_hand.get('left',  new_left).copy()
+                    frozen_hand_snapshot['right'] = last_commanded_hand.get('right', new_right).copy()
+                if current_tick_paused:
+                    pass   # Do not overwrite — hand controller reads last values
+                else:
+                    if alpha < 1.0:
+                        f_left  = frozen_hand_snapshot['left']
+                        f_right = frozen_hand_snapshot['right']
+                        out_left  = f_left  + alpha * (new_left  - f_left)
+                        out_right = f_right + alpha * (new_right - f_right)
+                    else:
+                        out_left, out_right = new_left, new_right
+                    with left_hand_pos_array.get_lock():
+                        left_hand_pos_array[:] = out_left
+                    with right_hand_pos_array.get_lock():
+                        right_hand_pos_array[:] = out_right
+                    last_commanded_hand['left']  = out_left.copy()
+                    last_commanded_hand['right'] = out_right.copy()
             elif args.ee == "dex1" and args.input_mode == "controller":
-                with left_gripper_value.get_lock():
-                    left_gripper_value.value = tele_data.left_ctrl_triggerValue
-                with right_gripper_value.get_lock():
-                    right_gripper_value.value = tele_data.right_ctrl_triggerValue
+                new_left  = tele_data.left_ctrl_triggerValue
+                new_right = tele_data.right_ctrl_triggerValue
+                if entering_pause:
+                    frozen_hand_snapshot['left']  = last_commanded_hand.get('left',  new_left)
+                    frozen_hand_snapshot['right'] = last_commanded_hand.get('right', new_right)
+                if current_tick_paused:
+                    pass   # Do not overwrite — hand controller reads last values
+                else:
+                    if alpha < 1.0:
+                        f_left  = frozen_hand_snapshot['left']
+                        f_right = frozen_hand_snapshot['right']
+                        out_left  = f_left  + alpha * (new_left  - f_left)
+                        out_right = f_right + alpha * (new_right - f_right)
+                    else:
+                        out_left, out_right = new_left, new_right
+                    with left_gripper_value.get_lock():
+                        left_gripper_value.value = out_left
+                    with right_gripper_value.get_lock():
+                        right_gripper_value.value = out_right
+                    last_commanded_hand['left']  = out_left
+                    last_commanded_hand['right'] = out_right
             elif args.ee == "dex1" and args.input_mode == "hand":
-                with left_gripper_value.get_lock():
-                    left_gripper_value.value = tele_data.left_hand_pinchValue
-                with right_gripper_value.get_lock():
-                    right_gripper_value.value = tele_data.right_hand_pinchValue
+                new_left  = tele_data.left_hand_pinchValue
+                new_right = tele_data.right_hand_pinchValue
+                if entering_pause:
+                    frozen_hand_snapshot['left']  = last_commanded_hand.get('left',  new_left)
+                    frozen_hand_snapshot['right'] = last_commanded_hand.get('right', new_right)
+                if current_tick_paused:
+                    pass   # Do not overwrite — hand controller reads last values
+                else:
+                    if alpha < 1.0:
+                        f_left  = frozen_hand_snapshot['left']
+                        f_right = frozen_hand_snapshot['right']
+                        out_left  = f_left  + alpha * (new_left  - f_left)
+                        out_right = f_right + alpha * (new_right - f_right)
+                    else:
+                        out_left, out_right = new_left, new_right
+                    with left_gripper_value.get_lock():
+                        left_gripper_value.value = out_left
+                    with right_gripper_value.get_lock():
+                        right_gripper_value.value = out_right
+                    last_commanded_hand['left']  = out_left
+                    last_commanded_hand['right'] = out_right
             elif (args.ee == "inspire_dfx" or args.ee == "inspire_ftp") and args.input_mode == "hand":
-                with left_hand_pos_array.get_lock():
-                    left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
-                with right_hand_pos_array.get_lock():
-                    right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
+                new_left  = tele_data.left_hand_pos.flatten()
+                new_right = tele_data.right_hand_pos.flatten()
+                if entering_pause:
+                    frozen_hand_snapshot['left']  = last_commanded_hand.get('left',  new_left).copy()
+                    frozen_hand_snapshot['right'] = last_commanded_hand.get('right', new_right).copy()
+                if current_tick_paused:
+                    pass   # Do not overwrite — hand controller reads last values
+                else:
+                    if alpha < 1.0:
+                        f_left  = frozen_hand_snapshot['left']
+                        f_right = frozen_hand_snapshot['right']
+                        out_left  = f_left  + alpha * (new_left  - f_left)
+                        out_right = f_right + alpha * (new_right - f_right)
+                    else:
+                        out_left, out_right = new_left, new_right
+                    with left_hand_pos_array.get_lock():
+                        left_hand_pos_array[:] = out_left
+                    with right_hand_pos_array.get_lock():
+                        right_hand_pos_array[:] = out_right
+                    last_commanded_hand['left']  = out_left.copy()
+                    last_commanded_hand['right'] = out_right.copy()
             elif (args.ee == "inspire_dfx" or args.ee == "inspire_ftp") and args.input_mode == "controller":
-                with left_gripper_value.get_lock():
-                    left_gripper_value.value = tele_data.left_ctrl_triggerValue
-                with right_gripper_value.get_lock():
-                    right_gripper_value.value = tele_data.right_ctrl_triggerValue
+                new_left  = tele_data.left_ctrl_triggerValue
+                new_right = tele_data.right_ctrl_triggerValue
+                if entering_pause:
+                    frozen_hand_snapshot['left']  = last_commanded_hand.get('left',  new_left)
+                    frozen_hand_snapshot['right'] = last_commanded_hand.get('right', new_right)
+                if current_tick_paused:
+                    pass   # Do not overwrite — hand controller reads last values
+                else:
+                    if alpha < 1.0:
+                        f_left  = frozen_hand_snapshot['left']
+                        f_right = frozen_hand_snapshot['right']
+                        out_left  = f_left  + alpha * (new_left  - f_left)
+                        out_right = f_right + alpha * (new_right - f_right)
+                    else:
+                        out_left, out_right = new_left, new_right
+                    with left_gripper_value.get_lock():
+                        left_gripper_value.value = out_left
+                    with right_gripper_value.get_lock():
+                        right_gripper_value.value = out_right
+                    last_commanded_hand['left']  = out_left
+                    last_commanded_hand['right'] = out_right
             else:
                 pass
             
