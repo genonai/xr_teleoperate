@@ -343,9 +343,47 @@ if __name__ == '__main__':
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
+        # Pause/ramp tick-local state (initialized once; mutated each tick below)
+        prev_paused             = False
+        ramp_remaining          = 0
+        frozen_sol_q            = None   # arm q captured at pause entry (blend-from)
+        frozen_sol_tauff        = None
+        last_commanded_q        = None   # arm q commanded at end of the previous tick
+        last_commanded_tauff    = None
+        frozen_hand_snapshot    = {}     # keyed 'left'/'right' — value type matches EE branch
+        last_commanded_hand     = {}     # keyed 'left'/'right' — last value we wrote to shared mem
         # main loop. robot start to follow VR user's motion
         while not STOP:
             start_time = time.time()
+
+            # --- Pause/ramp top-of-tick block -----------------------------------------
+            # Single atomic read of the async-mutated pause flag — use the local for
+            # the rest of the tick. (RECORD_RUNNING is deliberately NOT snapshotted
+            # here: the downstream recording append at line ~450 needs the freshest
+            # value, which may change during this tick when RECORD_TOGGLE is handled.)
+            current_tick_paused = PAUSED
+
+            entering_pause = current_tick_paused and not prev_paused
+            leaving_pause  = (not current_tick_paused) and prev_paused
+
+            if entering_pause:
+                logger_mp.info("⏸ PAUSED — robot holding last pose. Press [p] to resume.")
+            if leaving_pause:
+                ramp_remaining = RAMP_TICKS
+                logger_mp.info(f"▶ Resumed — ramping to current VR pose over {RAMP_TICKS/30.0:.1f}s.")
+
+            prev_paused = current_tick_paused
+
+            # Blend factor: 0.0 = fully frozen target, 1.0 = fully tracking fresh pose.
+            if current_tick_paused:
+                alpha = 0.0
+            elif ramp_remaining > 0:
+                ramp_remaining -= 1
+                alpha = (RAMP_TICKS - ramp_remaining) / RAMP_TICKS   # 1/30, 2/30, ..., 30/30
+            else:
+                alpha = 1.0
+            # --- end pause/ramp top-of-tick block ------------------------------------
+
             # get image
             if camera_config['head_camera']['enable_zmq']:
                 if args.record or xr_need_local_img:
