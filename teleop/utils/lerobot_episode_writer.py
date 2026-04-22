@@ -35,7 +35,13 @@ import numpy as np
 
 import logging_mp
 
-logger_mp = logging_mp.getLogger(__name__)
+try:
+    logger_mp = logging_mp.getLogger(__name__)
+except AttributeError:
+    # PC2 / .223 ships a logging_mp variant that exposes snake_case
+    # get_logger instead of camelCase getLogger. Same call semantics.
+    # See feedback_teleop_223_setup.md.
+    logger_mp = logging_mp.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
