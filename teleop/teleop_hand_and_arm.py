@@ -267,6 +267,36 @@ if __name__ == '__main__':
                 rerun_log = not args.headless,
             )
             if args.writer == 'lerobot':
+                # Startup-time schema guard — the writer is locked on
+                # Unitree_G1_Inspire_HeadOnly_Mono (640x480 mono head camera,
+                # G1_29 arm, 6-DOF Inspire end-effector). Catching
+                # incompatibilities here prevents the mid-episode BEL abort
+                # that would otherwise burn a VR session.
+                _hc = camera_config.get('head_camera', {}) if isinstance(camera_config, dict) else {}
+                if _hc.get('binocular', False):
+                    raise SystemExit(
+                        "--writer=lerobot requires a mono head camera; current "
+                        "head camera is binocular. Pass --no-binocular, or use "
+                        "--writer=json."
+                    )
+                _shape = tuple(_hc.get('image_shape', ()) or ())
+                if _shape and _shape != (640, 480):
+                    raise SystemExit(
+                        f"--writer=lerobot expects head camera image_shape "
+                        f"(640, 480); got {_shape}. Reconfigure the head camera "
+                        f"or use --writer=json."
+                    )
+                if args.arm != 'G1_29':
+                    raise SystemExit(
+                        f"--writer=lerobot is locked on arm=G1_29; got "
+                        f"arm={args.arm}. Use --writer=json for other arms."
+                    )
+                if args.ee not in ('inspire_dfx', 'inspire_ftp'):
+                    raise SystemExit(
+                        f"--writer=lerobot is locked on ee=inspire_dfx|inspire_ftp "
+                        f"(6-DOF Inspire); got ee={args.ee}. Use --writer=json "
+                        f"for other end effectors."
+                    )
                 # Lazy import so the legacy json path doesn't require
                 # pyarrow / the full LeRobot test dependency chain.
                 from teleop.utils.lerobot_episode_writer import LeRobotEpisodeWriter

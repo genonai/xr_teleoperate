@@ -194,7 +194,7 @@ def test_queue_overflow_triggers_episode_abort(tmp_path: Path, dummy_inputs):
     assert not ep_tmp_dir.exists(), "tmp dir must be purged on abort"
     # No final dir was written.
     assert not (Path(w.staging_dir) / "episode_000000").exists()
-    # episode_id rolled back (−1 since nothing has been saved).
+    # episode_id rolled back (-1 since nothing has been saved).
     assert w.episode_id == -1, f"expected rollback to -1, got {w.episode_id}"
 
     w.close()

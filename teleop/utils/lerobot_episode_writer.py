@@ -187,8 +187,14 @@ class LeRobotEpisodeWriter:
         self._ep_tmp_dir.mkdir(parents=True)
 
         if not self._spawn_ffmpeg():
-            # ffmpeg failed to start — treat as abort.
+            # ffmpeg failed to start — treat as abort. Roll back the
+            # eager episode_id increment so the next successful
+            # create_episode() reuses this slot (matches the rollback
+            # semantics of _abort_episode); otherwise we'd leave a gap
+            # in episode_NNNNNN on disk that the consolidator would
+            # inherit into the final dataset indexing.
             self._teardown_episode(purge=True)
+            self.episode_id -= 1
             return False
 
         self._frame_queue = queue.Queue(maxsize=self.queue_size)
@@ -623,6 +629,11 @@ class LeRobotEpisodeWriter:
         # atomic rename has already moved it to its final name).
         if purge and self._ep_tmp_dir is not None and self._ep_tmp_dir.exists():
             shutil.rmtree(self._ep_tmp_dir, ignore_errors=True)
+
+        # Clear _worker_error so a BrokenPipeError from this episode's
+        # ffmpeg teardown can't bleed into the next episode's state. The
+        # worker thread is already joined above, so this is race-free.
+        self._worker_error = None
 
         self._ep_tmp_dir = None
         self._ep_final_dir = None

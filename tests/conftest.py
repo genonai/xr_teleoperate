@@ -66,7 +66,7 @@ def dummy_state() -> dict:
 
 
 @pytest.fixture
-def dummy_action(dummy_state: dict) -> dict:
+def dummy_action() -> dict:
     """Same shape as state; different magnitudes so tests can tell them apart."""
     return {
         "left_arm":  {"qpos": [0.5] * 7},
