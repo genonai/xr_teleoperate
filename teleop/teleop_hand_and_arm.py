@@ -545,11 +545,31 @@ if __name__ == '__main__':
             current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
 
             # solve ik using motor data and wrist pose, then use ik results to control arms.
+            # IK is solved every tick even during pause so the solver's warm-start state
+            # (self.init_data seed + smooth_filter history) stays current for resume.
             time_ik_start = time.time()
             sol_q, sol_tauff  = arm_ik.solve_ik(tele_data.left_wrist_pose, tele_data.right_wrist_pose, current_lr_arm_q, current_lr_arm_dq)
             time_ik_end = time.time()
             logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
-            arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
+
+            if entering_pause:
+                # Freeze at the pose we actually commanded LAST tick (C0-continuous even
+                # if we were mid-ramp). Bootstrap with sol_q on the very first tick.
+                frozen_sol_q     = (last_commanded_q     if last_commanded_q     is not None else sol_q).copy()
+                frozen_sol_tauff = (last_commanded_tauff if last_commanded_tauff is not None else sol_tauff).copy()
+
+            if current_tick_paused:
+                target_q, target_tauff = frozen_sol_q, frozen_sol_tauff
+            elif alpha < 1.0:
+                target_q     = frozen_sol_q     + alpha * (sol_q     - frozen_sol_q)
+                target_tauff = frozen_sol_tauff + alpha * (sol_tauff - frozen_sol_tauff)
+            else:
+                target_q, target_tauff = sol_q, sol_tauff
+
+            arm_ctrl.ctrl_dual_arm(target_q, target_tauff)
+
+            last_commanded_q     = target_q.copy()
+            last_commanded_tauff = target_tauff.copy()
 
             # record data
             if args.record:
