@@ -360,7 +360,7 @@ if __name__ == "__main__":
     listen_keyboard_thread = threading.Thread(target=listen_keyboard, kwargs={"on_press": on_press, "until": None, "sequential": False}, daemon=True)
     listen_keyboard_thread.start()
 
-    logger_mp.info("✅ Client started, waiting for keyboard input:\n [r] launch, [s] start/stop record, [b] heartbeat, [q] exit")
+    logger_mp.info("✅ Client started, waiting for keyboard input:\n [r] launch, [s] start/stop record, [p] pause/resume, [b] heartbeat, [q] exit")
     try:
         while True:
             time.sleep(1.0)
