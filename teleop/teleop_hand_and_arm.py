@@ -88,15 +88,15 @@ if __name__ == '__main__':
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
     # record mode and task info
     parser.add_argument('--record', action = 'store_true', help = 'Enable data recording mode')
-    parser.add_argument('--writer', type = str, default = 'json', choices = ['json', 'lerobot'],
-                        help = "Episode writer backend. 'json' (default, safe) emits data.json + "
-                               "per-frame image files for offline conversion (legacy path). "
-                               "'lerobot' emits LeRobot v3 staging artifacts (parquet + MP4 + "
-                               "meta.json) directly; run "
+    parser.add_argument('--writer', type = str, default = 'lerobot', choices = ['json', 'lerobot'],
+                        help = "Episode writer backend. 'lerobot' (default) emits LeRobot v3 "
+                               "staging artifacts (parquet + MP4 + meta.json) directly; run "
                                "unitree_lerobot.utils.finalize_lerobot_dataset after the session "
-                               "to consolidate into the v3 chunked layout. Lerobot schema is "
-                               "locked on Unitree_G1_Inspire_HeadOnly_Mono (26D, 1-cam head mono "
-                               "640x480 @ 30fps).")
+                               "to consolidate into the v3 chunked layout. Schema is locked on "
+                               "Unitree_G1_Inspire_HeadOnly_Mono (26D, 1-cam head mono 640x480 "
+                               "@ 30fps). 'json' is the legacy path — data.json + per-frame "
+                               "image files for offline conversion; kept for rollback during "
+                               "the post-flip window.")
     parser.add_argument('--task-dir', type = str, default = './utils/data/', help = 'path to save data')
     parser.add_argument('--task-name', type = str, default = 'pick cube', help = 'task file name for recording')
     parser.add_argument('--task-goal', type = str, default = 'pick up cube.', help = 'task goal for recording at json file')
