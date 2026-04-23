@@ -17,7 +17,7 @@ from televuer import TeleVuerWrapper
 from teleop.robot_control.robot_arm import G1_29_ArmController, G1_23_ArmController, H1_2_ArmController, H1_ArmController
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK
 from teleimager.image_client import ImageClient
-from teleop.utils.episode_writer import EpisodeWriter
+from teleop.utils.episode_writer import EpisodeWriter as JsonEpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from sshkeyboard import listen_keyboard, stop_listening
@@ -88,6 +88,15 @@ if __name__ == '__main__':
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
     # record mode and task info
     parser.add_argument('--record', action = 'store_true', help = 'Enable data recording mode')
+    parser.add_argument('--writer', type = str, default = 'json', choices = ['json', 'lerobot'],
+                        help = "Episode writer backend. 'json' (default, safe) emits data.json + "
+                               "per-frame image files for offline conversion (legacy path). "
+                               "'lerobot' emits LeRobot v3 staging artifacts (parquet + MP4 + "
+                               "meta.json) directly; run "
+                               "unitree_lerobot.utils.finalize_lerobot_dataset after the session "
+                               "to consolidate into the v3 chunked layout. Lerobot schema is "
+                               "locked on Unitree_G1_Inspire_HeadOnly_Mono (26D, 1-cam head mono "
+                               "640x480 @ 30fps).")
     parser.add_argument('--task-dir', type = str, default = './utils/data/', help = 'path to save data')
     parser.add_argument('--task-name', type = str, default = 'pick cube', help = 'task file name for recording')
     parser.add_argument('--task-goal', type = str, default = 'pick up cube.', help = 'task goal for recording at json file')
@@ -248,12 +257,64 @@ if __name__ == '__main__':
 
         # record + headless / non-headless mode
         if args.record:
-            recorder = EpisodeWriter(task_dir = os.path.join(args.task_dir, args.task_name),
-                                     task_goal = args.task_goal,
-                                     task_desc = args.task_desc,
-                                     task_steps = args.task_steps,
-                                     frequency = args.frequency, 
-                                     rerun_log = not args.headless)
+            _writer_task_dir = os.path.join(args.task_dir, args.task_name)
+            _writer_kwargs = dict(
+                task_dir = _writer_task_dir,
+                task_goal = args.task_goal,
+                task_desc = args.task_desc,
+                task_steps = args.task_steps,
+                frequency = args.frequency,
+                rerun_log = not args.headless,
+            )
+            if args.writer == 'lerobot':
+                # Startup-time schema guard — the writer is locked on
+                # Unitree_G1_Inspire_HeadOnly_Mono (640x480 mono head camera,
+                # G1_29 arm, 6-DOF Inspire end-effector). Catching
+                # incompatibilities here prevents the mid-episode BEL abort
+                # that would otherwise burn a VR session.
+                _hc = camera_config.get('head_camera', {}) if isinstance(camera_config, dict) else {}
+                if _hc.get('binocular', False):
+                    raise SystemExit(
+                        "--writer=lerobot requires a mono head camera; current "
+                        "head camera is binocular. Pass --no-binocular, or use "
+                        "--writer=json."
+                    )
+                _shape = tuple(_hc.get('image_shape', ()) or ())
+                if _shape and _shape != (640, 480):
+                    raise SystemExit(
+                        f"--writer=lerobot expects head camera image_shape "
+                        f"(640, 480); got {_shape}. Reconfigure the head camera "
+                        f"or use --writer=json."
+                    )
+                if args.arm != 'G1_29':
+                    raise SystemExit(
+                        f"--writer=lerobot is locked on arm=G1_29; got "
+                        f"arm={args.arm}. Use --writer=json for other arms."
+                    )
+                if args.ee not in ('inspire_dfx', 'inspire_ftp'):
+                    raise SystemExit(
+                        f"--writer=lerobot is locked on ee=inspire_dfx|inspire_ftp "
+                        f"(6-DOF Inspire); got ee={args.ee}. Use --writer=json "
+                        f"for other end effectors."
+                    )
+                # Lazy import so the legacy json path doesn't require
+                # pyarrow / the full LeRobot test dependency chain.
+                from teleop.utils.lerobot_episode_writer import LeRobotEpisodeWriter
+                logger_mp.info(
+                    "📦 Writer: LeRobotEpisodeWriter — direct-to-LeRobot v3 "
+                    f"staging at {_writer_task_dir}/_staging/. Run "
+                    "`python -m unitree_lerobot.utils.finalize_lerobot_dataset "
+                    "--task-dir <path> --repo-id <id>` after this session to "
+                    "consolidate."
+                )
+                recorder = LeRobotEpisodeWriter(**_writer_kwargs)
+            else:
+                logger_mp.info(
+                    "📝 Writer: JsonEpisodeWriter (legacy) — data.json + "
+                    f"per-frame images at {_writer_task_dir}/. Pass "
+                    "`--writer lerobot` to skip the offline conversion step."
+                )
+                recorder = JsonEpisodeWriter(**_writer_kwargs)
 
         logger_mp.info("----------------------------------------------------------------")
         logger_mp.info("🟢  Press [r] to start syncing the robot with your movements.")
@@ -501,10 +562,22 @@ if __name__ == '__main__':
                         }, 
                     }
                     if args.sim:
-                        sim_state = sim_state_subscriber.read_data()            
+                        sim_state = sim_state_subscriber.read_data()
                         recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, sim_state=sim_state)
                     else:
                         recorder.add_item(colors=colors, depths=depths, states=states, actions=actions)
+
+                    # LeRobot writer can abort the episode mid-recording (queue
+                    # overflow, max-duration, malformed input) — transition the
+                    # FSM back to idle so the operator can re-record as the
+                    # same episode ID. Json writer has no such attribute;
+                    # getattr() keeps this branch-safe for both backends.
+                    if getattr(recorder, 'episode_corrupted', False):
+                        logger_mp.error(
+                            "❌ Episode aborted by writer — resetting "
+                            "RECORD_RUNNING. Press [s] to start a fresh take."
+                        )
+                        RECORD_RUNNING = False
 
             current_time = time.time()
             time_elapsed = current_time - start_time
