@@ -1,0 +1,58 @@
+"""Pure-function helpers for base-velocity capture.
+
+Split out from teleop_hand_and_arm.py so the math (stick→velocity map,
+FSM enum mapping) is unit-testable without running DDS or the teleop loop.
+
+Spec: docs/superpowers/specs/2026-04-24-teleop-base-velocity-recording-design.md
+"""
+from __future__ import annotations
+
+# Linear map gain — matches the existing VR-thumbstick → loco_wrapper.Move()
+# call in teleop_hand_and_arm.py:539-541. Signs to be bench-calibrated on PC2
+# (see scripts/real_eval/print_base_vel.py).
+SCALE_VX: float = 0.3
+SCALE_VY: float = 0.3
+SCALE_VYAW: float = 0.3
+DEADBAND: float = 0.05  # |axis| < DEADBAND → 0 (see spec §4)
+
+
+def _db(v: float) -> float:
+    return 0.0 if abs(v) < DEADBAND else v
+
+
+def r3_stick_to_cmd_vel(lx: float, ly: float, rx: float) -> tuple[float, float, float]:
+    """Map R3 stick axes to (vx, vy, vyaw) base velocity in robot body frame.
+
+    Sign convention mirrors teleop_hand_and_arm.py:539-541 (Quest controller
+    path). Bench-calibrate on PC2 before first real recording.
+    """
+    vx = -_db(ly) * SCALE_VX
+    vy = -_db(lx) * SCALE_VY
+    vyaw = -_db(rx) * SCALE_VYAW
+    return (vx, vy, vyaw)
+
+
+# FSM enum — dense 0..6 int8 encoding for the observation.fsm_mode column.
+# Separated from raw SportModeState.mode IDs to dodge the ML normalization
+# footgun (a naive pipeline treating `706 > 200` as quantitative).
+#
+# Spec §3.1. Slot 6 (TRANSITIONING) is reserved; raw-ID populated during
+# bench calibration once we observe which intermediate IDs the sport service
+# emits during 706 squat↔stand transitions.
+FSM_ENUM: dict[int, int] = {
+    200: 1,  # STAND
+    706: 2,  # SQUAT (steady)
+    1: 3,    # DAMP
+    3: 4,    # SIT
+    0: 5,    # ZERO_TORQUE
+    # Add intermediate transition IDs → 6 here after calibration.
+}
+
+
+def fsm_mode_to_enum(raw_mode: int) -> int:
+    """Map raw SportModeState.mode (uint8) to dense enum 0..6 int8.
+
+    Returns 0 (UNKNOWN) for any unmapped mode. After bench calibration,
+    intermediate squat-transition IDs should be added to FSM_ENUM → 6.
+    """
+    return FSM_ENUM.get(int(raw_mode), 0)
