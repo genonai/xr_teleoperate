@@ -64,10 +64,18 @@ def on_press(key):
         STOP = True
     elif key == 's' and START and not PAUSED:
         RECORD_TOGGLE = True
-    elif key == 'p' and START and not RECORD_RUNNING:
+    elif key == 'p' and START and not RECORD_RUNNING and not RECORD_TOGGLE:
+        # Also gate on RECORD_TOGGLE: closes the sub-tick race where `s` flips
+        # RECORD_TOGGLE=True but the main loop has not yet promoted it to
+        # RECORD_RUNNING=True — otherwise a `p` pressed between those two
+        # events would sneak paused frames into the new episode.
         PAUSED = not PAUSED
+    elif key in ('s', 'p'):
+        # Key is known but its guard rejected it (not tracking, wrong state, etc.)
+        logger_mp.warning(f"[on_press] {key} rejected — guard not satisfied for current state.")
     else:
-        logger_mp.warning(f"[on_press] {key} ignored (invalid in current state).")
+        # Key is not bound to any action in this FSM.
+        logger_mp.warning(f"[on_press] {key} — no action defined for this key.")
 
 def get_state() -> dict:
     """Return current heartbeat state"""
