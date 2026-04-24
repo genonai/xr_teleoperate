@@ -16,7 +16,7 @@ SCALE_VYAW: float = 0.3
 DEADBAND: float = 0.05  # |axis| < DEADBAND → 0 (see spec §4)
 
 
-def _db(v: float) -> float:
+def _apply_deadband(v: float) -> float:
     return 0.0 if abs(v) < DEADBAND else v
 
 
@@ -26,9 +26,9 @@ def r3_stick_to_cmd_vel(lx: float, ly: float, rx: float) -> tuple[float, float, 
     Sign convention mirrors teleop_hand_and_arm.py:539-541 (Quest controller
     path). Bench-calibrate on PC2 before first real recording.
     """
-    vx = -_db(ly) * SCALE_VX
-    vy = -_db(lx) * SCALE_VY
-    vyaw = -_db(rx) * SCALE_VYAW
+    vx = -_apply_deadband(ly) * SCALE_VX
+    vy = -_apply_deadband(lx) * SCALE_VY
+    vyaw = -_apply_deadband(rx) * SCALE_VYAW
     return (vx, vy, vyaw)
 
 
