@@ -378,7 +378,7 @@ if __name__ == '__main__':
                 logger_mp.info("⏸ PAUSED — robot holding last pose. Press [p] to resume.")
             if leaving_pause:
                 ramp_remaining = RAMP_TICKS
-                logger_mp.info(f"▶ Resumed — ramping to current VR pose over {RAMP_TICKS/30.0:.1f}s.")
+                logger_mp.info(f"▶ Resumed — ramping to current VR pose over {RAMP_TICKS/args.frequency:.1f}s.")
 
             prev_paused = current_tick_paused
 
