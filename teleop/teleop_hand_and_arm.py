@@ -421,6 +421,11 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
+            # Pause/ramp dispatch across EEs — the five non-else branches below share
+            # an identical structure (snapshot → skip-if-paused → blend → write →
+            # update last_commanded), differing only in data type (array vs scalar)
+            # and which shared-memory target they write to. Scheduled for extraction
+            # into a single helper per genonai/IL_PhysicalAI#30.
             if (args.ee == "dex3" or args.ee == "brainco") and args.input_mode == "hand":
                 new_left  = tele_data.left_hand_pos.flatten()
                 new_right = tele_data.right_hand_pos.flatten()
