@@ -36,6 +36,8 @@ STOP           = False  # Enable to begin system exit procedure
 READY          = False  # Ready to (1) enter START state, (2) enter RECORD_RUNNING state
 RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
+PAUSED         = False  # True while [p] paused — robot holds last commanded pose
+RAMP_TICKS     = 30     # Resume blend window (1.0s @ 30Hz)
 #  -------        ---------                -----------                -----------            ---------
 #   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
 #  -------        ---------      |         -----------      |         -----------      |     ---------
@@ -47,27 +49,43 @@ RECORD_TOGGLE  = False  # Toggle recording state
 #  -------        ---------                -----------                 -----------            ---------
 #  ==> manual: when READY is True, set RECORD_TOGGLE=True to transition.
 #  --> auto  : Auto-transition after saving data.
+#
+#  [p] Pause branch (only from [Ready], not from [Recording]):
+#     [Ready]  --p-->  [Paused]  --p-->  [Resuming (ramp, RAMP_TICKS ticks)]  -->  [Ready]
+#  During [Paused]: arm re-sends frozen target, hand writes skipped, [s] rejected.
+#  During [Resuming]: alpha sweeps 1/RAMP_TICKS → 1.0, blending frozen → fresh.
 
 def on_press(key):
-    global STOP, START, RECORD_TOGGLE
+    global STOP, START, RECORD_TOGGLE, PAUSED
     if key == 'r':
         START = True
     elif key == 'q':
         START = False
         STOP = True
-    elif key == 's' and START == True:
+    elif key == 's' and START and not PAUSED:
         RECORD_TOGGLE = True
+    elif key == 'p' and START and not RECORD_RUNNING and not RECORD_TOGGLE:
+        # Also gate on RECORD_TOGGLE: closes the sub-tick race where `s` flips
+        # RECORD_TOGGLE=True but the main loop has not yet promoted it to
+        # RECORD_RUNNING=True — otherwise a `p` pressed between those two
+        # events would sneak paused frames into the new episode.
+        PAUSED = not PAUSED
+    elif key in ('s', 'p'):
+        # Key is known but its guard rejected it (not tracking, wrong state, etc.)
+        logger_mp.warning(f"[on_press] {key} rejected — guard not satisfied for current state.")
     else:
-        logger_mp.warning(f"[on_press] {key} was pressed, but no action is defined for this key.")
+        # Key is not bound to any action in this FSM.
+        logger_mp.warning(f"[on_press] {key} — no action defined for this key.")
 
 def get_state() -> dict:
     """Return current heartbeat state"""
-    global START, STOP, RECORD_RUNNING, READY
+    global START, STOP, RECORD_RUNNING, READY, PAUSED
     return {
         "START": START,
         "STOP": STOP,
         "READY": READY,
         "RECORD_RUNNING": RECORD_RUNNING,
+        "PAUSED": PAUSED,
     }
 
 if __name__ == '__main__':
@@ -333,9 +351,47 @@ if __name__ == '__main__':
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
+        # Pause/ramp tick-local state (initialized once; mutated each tick below)
+        prev_paused             = False
+        ramp_remaining          = 0
+        frozen_sol_q            = None   # arm q captured at pause entry (blend-from)
+        frozen_sol_tauff        = None
+        last_commanded_q        = None   # arm q commanded at end of the previous tick
+        last_commanded_tauff    = None
+        frozen_hand_snapshot    = {}     # keyed 'left'/'right' — value type matches EE branch
+        last_commanded_hand     = {}     # keyed 'left'/'right' — last value we wrote to shared mem
         # main loop. robot start to follow VR user's motion
         while not STOP:
             start_time = time.time()
+
+            # --- Pause/ramp top-of-tick block -----------------------------------------
+            # Single atomic read of the async-mutated pause flag — use the local for
+            # the rest of the tick. (RECORD_RUNNING is deliberately NOT snapshotted
+            # here: the downstream recording append at line ~450 needs the freshest
+            # value, which may change during this tick when RECORD_TOGGLE is handled.)
+            current_tick_paused = PAUSED
+
+            entering_pause = current_tick_paused and not prev_paused
+            leaving_pause  = (not current_tick_paused) and prev_paused
+
+            if entering_pause:
+                logger_mp.info("⏸ PAUSED — robot holding last pose. Press [p] to resume.")
+            if leaving_pause:
+                ramp_remaining = RAMP_TICKS
+                logger_mp.info(f"▶ Resumed — ramping to current VR pose over {RAMP_TICKS/args.frequency:.1f}s.")
+
+            prev_paused = current_tick_paused
+
+            # Blend factor: 0.0 = fully frozen target, 1.0 = fully tracking fresh pose.
+            if current_tick_paused:
+                alpha = 0.0
+            elif ramp_remaining > 0:
+                ramp_remaining -= 1
+                alpha = (RAMP_TICKS - ramp_remaining) / RAMP_TICKS   # 1/30, 2/30, ..., 30/30
+            else:
+                alpha = 1.0
+            # --- end pause/ramp top-of-tick block ------------------------------------
+
             # get image
             if camera_config['head_camera']['enable_zmq']:
                 if args.record or xr_need_local_img:
@@ -365,31 +421,121 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
+            # Pause/ramp dispatch across EEs — the five non-else branches below share
+            # an identical structure (snapshot → skip-if-paused → blend → write →
+            # update last_commanded), differing only in data type (array vs scalar)
+            # and which shared-memory target they write to. Scheduled for extraction
+            # into a single helper per genonai/IL_PhysicalAI#30.
             if (args.ee == "dex3" or args.ee == "brainco") and args.input_mode == "hand":
-                with left_hand_pos_array.get_lock():
-                    left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
-                with right_hand_pos_array.get_lock():
-                    right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
+                new_left  = tele_data.left_hand_pos.flatten()
+                new_right = tele_data.right_hand_pos.flatten()
+                if entering_pause:
+                    frozen_hand_snapshot['left']  = last_commanded_hand.get('left',  new_left).copy()
+                    frozen_hand_snapshot['right'] = last_commanded_hand.get('right', new_right).copy()
+                if current_tick_paused:
+                    pass   # Do not overwrite — hand controller reads last values
+                else:
+                    if alpha < 1.0:
+                        f_left  = frozen_hand_snapshot['left']
+                        f_right = frozen_hand_snapshot['right']
+                        out_left  = f_left  + alpha * (new_left  - f_left)
+                        out_right = f_right + alpha * (new_right - f_right)
+                    else:
+                        out_left, out_right = new_left, new_right
+                    with left_hand_pos_array.get_lock():
+                        left_hand_pos_array[:] = out_left
+                    with right_hand_pos_array.get_lock():
+                        right_hand_pos_array[:] = out_right
+                    last_commanded_hand['left']  = out_left.copy()
+                    last_commanded_hand['right'] = out_right.copy()
             elif args.ee == "dex1" and args.input_mode == "controller":
-                with left_gripper_value.get_lock():
-                    left_gripper_value.value = tele_data.left_ctrl_triggerValue
-                with right_gripper_value.get_lock():
-                    right_gripper_value.value = tele_data.right_ctrl_triggerValue
+                new_left  = tele_data.left_ctrl_triggerValue
+                new_right = tele_data.right_ctrl_triggerValue
+                if entering_pause:
+                    frozen_hand_snapshot['left']  = last_commanded_hand.get('left',  new_left)
+                    frozen_hand_snapshot['right'] = last_commanded_hand.get('right', new_right)
+                if current_tick_paused:
+                    pass   # Do not overwrite — hand controller reads last values
+                else:
+                    if alpha < 1.0:
+                        f_left  = frozen_hand_snapshot['left']
+                        f_right = frozen_hand_snapshot['right']
+                        out_left  = f_left  + alpha * (new_left  - f_left)
+                        out_right = f_right + alpha * (new_right - f_right)
+                    else:
+                        out_left, out_right = new_left, new_right
+                    with left_gripper_value.get_lock():
+                        left_gripper_value.value = out_left
+                    with right_gripper_value.get_lock():
+                        right_gripper_value.value = out_right
+                    last_commanded_hand['left']  = out_left
+                    last_commanded_hand['right'] = out_right
             elif args.ee == "dex1" and args.input_mode == "hand":
-                with left_gripper_value.get_lock():
-                    left_gripper_value.value = tele_data.left_hand_pinchValue
-                with right_gripper_value.get_lock():
-                    right_gripper_value.value = tele_data.right_hand_pinchValue
+                new_left  = tele_data.left_hand_pinchValue
+                new_right = tele_data.right_hand_pinchValue
+                if entering_pause:
+                    frozen_hand_snapshot['left']  = last_commanded_hand.get('left',  new_left)
+                    frozen_hand_snapshot['right'] = last_commanded_hand.get('right', new_right)
+                if current_tick_paused:
+                    pass   # Do not overwrite — hand controller reads last values
+                else:
+                    if alpha < 1.0:
+                        f_left  = frozen_hand_snapshot['left']
+                        f_right = frozen_hand_snapshot['right']
+                        out_left  = f_left  + alpha * (new_left  - f_left)
+                        out_right = f_right + alpha * (new_right - f_right)
+                    else:
+                        out_left, out_right = new_left, new_right
+                    with left_gripper_value.get_lock():
+                        left_gripper_value.value = out_left
+                    with right_gripper_value.get_lock():
+                        right_gripper_value.value = out_right
+                    last_commanded_hand['left']  = out_left
+                    last_commanded_hand['right'] = out_right
             elif (args.ee == "inspire_dfx" or args.ee == "inspire_ftp") and args.input_mode == "hand":
-                with left_hand_pos_array.get_lock():
-                    left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
-                with right_hand_pos_array.get_lock():
-                    right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
+                new_left  = tele_data.left_hand_pos.flatten()
+                new_right = tele_data.right_hand_pos.flatten()
+                if entering_pause:
+                    frozen_hand_snapshot['left']  = last_commanded_hand.get('left',  new_left).copy()
+                    frozen_hand_snapshot['right'] = last_commanded_hand.get('right', new_right).copy()
+                if current_tick_paused:
+                    pass   # Do not overwrite — hand controller reads last values
+                else:
+                    if alpha < 1.0:
+                        f_left  = frozen_hand_snapshot['left']
+                        f_right = frozen_hand_snapshot['right']
+                        out_left  = f_left  + alpha * (new_left  - f_left)
+                        out_right = f_right + alpha * (new_right - f_right)
+                    else:
+                        out_left, out_right = new_left, new_right
+                    with left_hand_pos_array.get_lock():
+                        left_hand_pos_array[:] = out_left
+                    with right_hand_pos_array.get_lock():
+                        right_hand_pos_array[:] = out_right
+                    last_commanded_hand['left']  = out_left.copy()
+                    last_commanded_hand['right'] = out_right.copy()
             elif (args.ee == "inspire_dfx" or args.ee == "inspire_ftp") and args.input_mode == "controller":
-                with left_gripper_value.get_lock():
-                    left_gripper_value.value = tele_data.left_ctrl_triggerValue
-                with right_gripper_value.get_lock():
-                    right_gripper_value.value = tele_data.right_ctrl_triggerValue
+                new_left  = tele_data.left_ctrl_triggerValue
+                new_right = tele_data.right_ctrl_triggerValue
+                if entering_pause:
+                    frozen_hand_snapshot['left']  = last_commanded_hand.get('left',  new_left)
+                    frozen_hand_snapshot['right'] = last_commanded_hand.get('right', new_right)
+                if current_tick_paused:
+                    pass   # Do not overwrite — hand controller reads last values
+                else:
+                    if alpha < 1.0:
+                        f_left  = frozen_hand_snapshot['left']
+                        f_right = frozen_hand_snapshot['right']
+                        out_left  = f_left  + alpha * (new_left  - f_left)
+                        out_right = f_right + alpha * (new_right - f_right)
+                    else:
+                        out_left, out_right = new_left, new_right
+                    with left_gripper_value.get_lock():
+                        left_gripper_value.value = out_left
+                    with right_gripper_value.get_lock():
+                        right_gripper_value.value = out_right
+                    last_commanded_hand['left']  = out_left
+                    last_commanded_hand['right'] = out_right
             else:
                 pass
             
@@ -412,11 +558,31 @@ if __name__ == '__main__':
             current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
 
             # solve ik using motor data and wrist pose, then use ik results to control arms.
+            # IK is solved every tick even during pause so the solver's warm-start state
+            # (self.init_data seed + smooth_filter history) stays current for resume.
             time_ik_start = time.time()
             sol_q, sol_tauff  = arm_ik.solve_ik(tele_data.left_wrist_pose, tele_data.right_wrist_pose, current_lr_arm_q, current_lr_arm_dq)
             time_ik_end = time.time()
             logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
-            arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
+
+            if entering_pause:
+                # Freeze at the pose we actually commanded LAST tick (C0-continuous even
+                # if we were mid-ramp). Bootstrap with sol_q on the very first tick.
+                frozen_sol_q     = (last_commanded_q     if last_commanded_q     is not None else sol_q).copy()
+                frozen_sol_tauff = (last_commanded_tauff if last_commanded_tauff is not None else sol_tauff).copy()
+
+            if current_tick_paused:
+                target_q, target_tauff = frozen_sol_q, frozen_sol_tauff
+            elif alpha < 1.0:
+                target_q     = frozen_sol_q     + alpha * (sol_q     - frozen_sol_q)
+                target_tauff = frozen_sol_tauff + alpha * (sol_tauff - frozen_sol_tauff)
+            else:
+                target_q, target_tauff = sol_q, sol_tauff
+
+            arm_ctrl.ctrl_dual_arm(target_q, target_tauff)
+
+            last_commanded_q     = target_q.copy()
+            last_commanded_tauff = target_tauff.copy()
 
             # record data
             if args.record:
