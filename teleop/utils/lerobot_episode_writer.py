@@ -15,7 +15,7 @@ Schema is locked on Unitree_G1_Inspire_HeadOnly_Mono_BaseVel_v1:
         left_arm.qpos[7] + right_arm.qpos[7] + left_ee.qpos[6] + right_ee.qpos[6]
         + base_cmd.qpos[3]
     observation.images.cam_head: 640x480 BGR @ 30 fps (incoming key 'color_0')
-    observation.fsm_mode: int8 (planned for Task 4 — not yet written)
+    observation.fsm_mode: int8 (buffered; column written to parquet in Task 5)
 
 Abort semantics — IL temporal-sync requirement:
     On video-queue overflow, ffmpeg failure, or max-duration breach, the
@@ -132,6 +132,7 @@ class LeRobotEpisodeWriter:
         # Preallocated per-session buffers (reused across episodes).
         self._state_buf = np.zeros((self.max_frames, STATE_DIM), dtype=np.float32)
         self._action_buf = np.zeros((self.max_frames, ACTION_DIM), dtype=np.float32)
+        self._fsm_mode_buf = np.zeros((self.max_frames,), dtype=np.int8)
         self._ts_buf = np.zeros((self.max_frames,), dtype=np.float32)
         self._n_frames = 0
 
@@ -226,6 +227,7 @@ class LeRobotEpisodeWriter:
         depths: dict | None = None,
         states: dict | None = None,
         actions: dict | None = None,
+        fsm_mode: int = 0,
         tactiles=None,
         audios=None,
         sim_state=None,
@@ -272,6 +274,10 @@ class LeRobotEpisodeWriter:
         except (KeyError, ValueError, TypeError) as e:
             self._abort_episode(f"state/action flattening failed: {e}")
             return
+
+        # Write fsm_mode after state/action flatten so the row is committed
+        # in the same step. Cast clamps out-of-range ints into int8 range.
+        self._fsm_mode_buf[idx] = np.int8(fsm_mode)
 
         # Extract head-cam BGR frame.
         frame = None if colors is None else colors.get(DEFAULT_CAMERA_INCOMING_KEY)
