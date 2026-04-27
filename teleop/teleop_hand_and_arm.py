@@ -71,6 +71,10 @@ def on_press(key):
         # RECORD_RUNNING=True — otherwise a `p` pressed between those two
         # events would sneak paused frames into the new episode.
         PAUSED = not PAUSED
+        # Synchronous feedback so a fast double-press (where both flips happen
+        # between two main-loop ticks → no edge detected → no ⏸/▶ log) still
+        # tells the operator that each press registered.
+        logger_mp.info(f"[on_press] PAUSED → {PAUSED}")
     elif key in ('s', 'p'):
         # Key is known but its guard rejected it (not tracking, wrong state, etc.)
         logger_mp.warning(f"[on_press] {key} rejected — guard not satisfied for current state.")
