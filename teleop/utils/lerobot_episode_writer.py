@@ -574,8 +574,6 @@ class LeRobotEpisodeWriter:
         import pyarrow.parquet as pq
 
         n = self._n_frames
-        # Store observation.state / action as fixed-size list<float32>. The
-        # consolidator re-emits in LeRobot v3 canonical column types.
         state_col = [self._state_buf[i].tolist() for i in range(n)]
         action_col = [self._action_buf[i].tolist() for i in range(n)]
 
@@ -584,6 +582,11 @@ class LeRobotEpisodeWriter:
                 "observation.state": pa.array(
                     state_col, type=pa.list_(pa.float32(), STATE_DIM)
                 ),
+                # 1D numpy arrays go straight into pa.array — no .tolist()
+                # round-trip needed (unlike the 2D state/action list-arrays
+                # above). int8 dtype carries through the numpy → pyarrow
+                # path without an explicit type= kwarg.
+                "observation.fsm_mode": pa.array(self._fsm_mode_buf[:n]),
                 "action": pa.array(
                     action_col, type=pa.list_(pa.float32(), ACTION_DIM)
                 ),
