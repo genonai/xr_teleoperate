@@ -93,7 +93,7 @@ def test_create_then_save_produces_valid_parquet_and_mp4(
 
     N = 10
     for _ in range(N):
-        w.add_item(colors=colors, states=states, actions=actions)
+        w.add_item(colors=colors, states=states, actions=actions, fsm_mode=0)
 
     assert w.save_episode() is True
     assert w.is_ready()
@@ -111,17 +111,19 @@ def test_create_then_save_produces_valid_parquet_and_mp4(
     # Required columns present.
     cols = set(table.column_names)
     assert {"observation.state", "action", "timestamp", "frame_index", "episode_index"} <= cols
-    # 26D fixed-size list entries.
+    # 30D state / 29D action fixed-size list entries.
     first_state = table.column("observation.state")[0].as_py()
     first_action = table.column("action")[0].as_py()
-    assert len(first_state) == STATE_DIM == 26
-    assert len(first_action) == ACTION_DIM == 26
+    assert len(first_state) == STATE_DIM == 30
+    assert len(first_action) == ACTION_DIM == 29
     # State values match what dummy_state flattens to:
     #   left_arm (0.1)*7 + right_arm (0.2)*7 + left_ee (0.3)*6 + right_ee (0.4)*6
+    #   + base_achieved (0.0)*4
     np.testing.assert_allclose(first_state[:7],    [0.1] * 7, atol=1e-6)
     np.testing.assert_allclose(first_state[7:14],  [0.2] * 7, atol=1e-6)
     np.testing.assert_allclose(first_state[14:20], [0.3] * 6, atol=1e-6)
     np.testing.assert_allclose(first_state[20:26], [0.4] * 6, atol=1e-6)
+    np.testing.assert_allclose(first_state[26:30], [0.0] * 4, atol=1e-6)
     # Monotonic timestamps.
     ts = table.column("timestamp").to_pylist()
     assert all(t1 >= t0 for t0, t1 in zip(ts, ts[1:]))
@@ -140,7 +142,7 @@ def test_save_is_atomic_no_tmp_left(tmp_path: Path, dummy_inputs):
     w = _make_writer(tmp_path)
     w.create_episode()
     for _ in range(5):
-        w.add_item(colors=colors, states=states, actions=actions)
+        w.add_item(colors=colors, states=states, actions=actions, fsm_mode=0)
     assert w.save_episode() is True
 
     staging = Path(w.staging_dir)
@@ -156,7 +158,7 @@ def test_episode_ids_increment_across_saves(tmp_path: Path, dummy_inputs):
     for expected_id in range(3):
         w.create_episode()
         for _ in range(3):
-            w.add_item(colors=colors, states=states, actions=actions)
+            w.add_item(colors=colors, states=states, actions=actions, fsm_mode=0)
         assert w.save_episode() is True
         assert (Path(w.staging_dir) / f"episode_{expected_id:06d}").is_dir()
     w.close()
@@ -184,7 +186,7 @@ def test_queue_overflow_triggers_episode_abort(tmp_path: Path, dummy_inputs):
 
     # Feed queue_size + 1 frames. Worker never drains → put_nowait raises Full.
     for _ in range(w.queue_size + 5):
-        w.add_item(colors=colors, states=states, actions=actions)
+        w.add_item(colors=colors, states=states, actions=actions, fsm_mode=0)
         if w.episode_corrupted:
             break
 
@@ -210,7 +212,7 @@ def test_max_duration_triggers_episode_abort(tmp_path: Path, dummy_inputs):
     max_frames = w.max_frames
     assert max_frames == 30
     for _ in range(max_frames + 5):
-        w.add_item(colors=colors, states=states, actions=actions)
+        w.add_item(colors=colors, states=states, actions=actions, fsm_mode=0)
         if w.episode_corrupted:
             break
 
@@ -231,16 +233,16 @@ def test_abort_does_not_touch_prior_completed_episodes(
     # Save episode 0 cleanly.
     w.create_episode()
     for _ in range(5):
-        w.add_item(colors=colors, states=states, actions=actions)
+        w.add_item(colors=colors, states=states, actions=actions, fsm_mode=0)
     assert w.save_episode() is True
     ep0 = Path(w.staging_dir) / "episode_000000"
     ep0_files_before = {p.name: p.stat().st_size for p in ep0.iterdir()}
 
     # Start episode 1 and force an abort (inject a bad frame shape).
     w.create_episode()
-    w.add_item(colors=colors, states=states, actions=actions)  # 1 good frame
+    w.add_item(colors=colors, states=states, actions=actions, fsm_mode=0)  # 1 good frame
     bad_colors = {"color_0": np.zeros((100, 100, 3), dtype=np.uint8)}  # wrong shape
-    w.add_item(colors=bad_colors, states=states, actions=actions)
+    w.add_item(colors=bad_colors, states=states, actions=actions, fsm_mode=0)
 
     assert w.episode_corrupted
     # Episode 1's .tmp purged, final dir never created.
@@ -266,13 +268,13 @@ def test_abort_after_rollback_recreate_reuses_same_id(
     # Save ep 0.
     w.create_episode()
     for _ in range(3):
-        w.add_item(colors=colors, states=states, actions=actions)
+        w.add_item(colors=colors, states=states, actions=actions, fsm_mode=0)
     w.save_episode()
 
     # Start ep 1, abort it via missing cam key.
     w.create_episode()
     assert w.episode_id == 1
-    w.add_item(colors={}, states=states, actions=actions)  # no color_0 → abort
+    w.add_item(colors={}, states=states, actions=actions, fsm_mode=0)  # no color_0 → abort
     assert w.episode_corrupted
     assert w.episode_id == 0, "rolled back to 0 (ep 0 is the latest completed)"
 
@@ -280,7 +282,7 @@ def test_abort_after_rollback_recreate_reuses_same_id(
     w.create_episode()
     assert w.episode_id == 1
     for _ in range(3):
-        w.add_item(colors=colors, states=states, actions=actions)
+        w.add_item(colors=colors, states=states, actions=actions, fsm_mode=0)
     assert w.save_episode() is True
     assert (Path(w.staging_dir) / "episode_000001").is_dir()
 
@@ -295,7 +297,7 @@ def test_abort_after_rollback_recreate_reuses_same_id(
 def test_missing_cam_key_aborts(tmp_path: Path, dummy_state, dummy_action):
     w = _make_writer(tmp_path)
     w.create_episode()
-    w.add_item(colors={}, states=dummy_state, actions=dummy_action)
+    w.add_item(colors={}, states=dummy_state, actions=dummy_action, fsm_mode=0)
     assert w.episode_corrupted
     assert w.is_ready()
     w.close()
@@ -305,21 +307,22 @@ def test_wrong_frame_shape_aborts(tmp_path: Path, dummy_state, dummy_action):
     w = _make_writer(tmp_path)
     w.create_episode()
     bad = np.zeros((100, 100, 3), dtype=np.uint8)  # not 640x480
-    w.add_item(colors={"color_0": bad}, states=dummy_state, actions=dummy_action)
+    w.add_item(colors={"color_0": bad}, states=dummy_state, actions=dummy_action, fsm_mode=0)
     assert w.episode_corrupted
     w.close()
 
 
 def test_wrong_state_dim_aborts(tmp_path: Path, dummy_frame, dummy_action):
     bad_state = {
-        "left_arm":  {"qpos": [0.0] * 6},  # 6 instead of 7
-        "right_arm": {"qpos": [0.0] * 7},
-        "left_ee":   {"qpos": [0.0] * 6},
-        "right_ee":  {"qpos": [0.0] * 6},
+        "left_arm":       {"qpos": [0.0] * 6},  # 6 instead of 7
+        "right_arm":      {"qpos": [0.0] * 7},
+        "left_ee":        {"qpos": [0.0] * 6},
+        "right_ee":       {"qpos": [0.0] * 6},
+        "base_achieved":  {"qpos": [0.0] * 4},
     }
     w = _make_writer(tmp_path)
     w.create_episode()
-    w.add_item(colors={"color_0": dummy_frame}, states=bad_state, actions=dummy_action)
+    w.add_item(colors={"color_0": dummy_frame}, states=bad_state, actions=dummy_action, fsm_mode=0)
     assert w.episode_corrupted
     w.close()
 
@@ -354,7 +357,7 @@ def test_preallocated_buffers_not_reallocated_across_items(
 
     w.create_episode()
     for _ in range(20):
-        w.add_item(colors=colors, states=states, actions=actions)
+        w.add_item(colors=colors, states=states, actions=actions, fsm_mode=0)
     w.save_episode()
 
     assert id(w._state_buf) == state_id_before, "state buffer reallocated"
@@ -366,7 +369,7 @@ def test_preallocated_buffers_not_reallocated_across_items(
     # Same buffers survive a second episode.
     w.create_episode()
     for _ in range(5):
-        w.add_item(colors=colors, states=states, actions=actions)
+        w.add_item(colors=colors, states=states, actions=actions, fsm_mode=0)
     w.save_episode()
     assert w._state_buf.ctypes.data == state_base_before
     assert w._action_buf.ctypes.data == action_base_before
@@ -382,23 +385,31 @@ def test_preallocated_buffers_not_reallocated_across_items(
 def test_state_flatten_order_is_arm_then_hand_left_then_right(
     tmp_path: Path, dummy_frame
 ):
-    """Verify the 26D field order matches ROBOT_CONFIGS motors list exactly."""
+    """Verify the 30D field order matches ROBOT_CONFIGS motors list exactly."""
     # Use distinctive values so we can assert per-part ordering.
     state = {
+        "left_arm":       {"qpos": [1, 2, 3, 4, 5, 6, 7]},
+        "right_arm":      {"qpos": [8, 9, 10, 11, 12, 13, 14]},
+        "left_ee":        {"qpos": [15, 16, 17, 18, 19, 20]},
+        "right_ee":       {"qpos": [21, 22, 23, 24, 25, 26]},
+        "base_achieved":  {"qpos": [27, 28, 29, 30]},
+    }
+    action = {
         "left_arm":  {"qpos": [1, 2, 3, 4, 5, 6, 7]},
         "right_arm": {"qpos": [8, 9, 10, 11, 12, 13, 14]},
         "left_ee":   {"qpos": [15, 16, 17, 18, 19, 20]},
         "right_ee":  {"qpos": [21, 22, 23, 24, 25, 26]},
+        "base_cmd":  {"qpos": [27, 28, 29]},
     }
     w = _make_writer(tmp_path)
     w.create_episode()
-    w.add_item(colors={"color_0": dummy_frame}, states=state, actions=state)
+    w.add_item(colors={"color_0": dummy_frame}, states=state, actions=action, fsm_mode=0)
     w.save_episode()
 
     table = pq.read_table(Path(w.staging_dir) / "episode_000000" / "data.parquet")
     flat = table.column("observation.state")[0].as_py()
-    assert flat == [float(x) for x in range(1, 27)], (
-        f"26D flatten order incorrect: {flat}"
+    assert flat == [float(x) for x in range(1, 31)], (
+        f"30D flatten order incorrect: {flat}"
     )
     w.close()
 
@@ -438,7 +449,7 @@ def test_rerun_logging_runs_on_worker_thread_not_hot_path(
     N = 5
     t0 = time.monotonic()
     for _ in range(N):
-        w.add_item(colors=colors, states=states, actions=actions)
+        w.add_item(colors=colors, states=states, actions=actions, fsm_mode=0)
     hot_path_sec = time.monotonic() - t0
 
     # If Rerun were inline, this would be >= N * SLOW_MS = 250 ms.
@@ -464,7 +475,7 @@ def test_rerun_logging_runs_on_worker_thread_not_hot_path(
 
 
 def test_module_constants_match_spec():
-    assert STATE_DIM == 26
-    assert ACTION_DIM == 26
+    assert STATE_DIM == 30
+    assert ACTION_DIM == 29
     assert CAM_FEATURE_KEY == "observation.images.cam_head"
     assert DEFAULT_CAMERA_INCOMING_KEY == "color_0"

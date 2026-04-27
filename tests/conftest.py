@@ -56,12 +56,13 @@ def dummy_frame(image_size: tuple[int, int]) -> np.ndarray:
 
 @pytest.fixture
 def dummy_state() -> dict:
-    """Nested-dict state matching Unitree_G1_Inspire_HeadOnly_Mono 26D layout."""
+    """Nested-dict state matching Unitree_G1_Inspire_HeadOnly_Mono_BaseVel_v1 30D layout."""
     return {
-        "left_arm":  {"qpos": [0.1] * 7, "qvel": [0.0] * 7, "torque": [0.0] * 7},
-        "right_arm": {"qpos": [0.2] * 7, "qvel": [0.0] * 7, "torque": [0.0] * 7},
-        "left_ee":   {"qpos": [0.3] * 6, "qvel": [0.0] * 6, "torque": [0.0] * 6},
-        "right_ee":  {"qpos": [0.4] * 6, "qvel": [0.0] * 6, "torque": [0.0] * 6},
+        "left_arm":       {"qpos": [0.1] * 7, "qvel": [0.0] * 7, "torque": [0.0] * 7},
+        "right_arm":      {"qpos": [0.2] * 7, "qvel": [0.0] * 7, "torque": [0.0] * 7},
+        "left_ee":        {"qpos": [0.3] * 6, "qvel": [0.0] * 6, "torque": [0.0] * 6},
+        "right_ee":       {"qpos": [0.4] * 6, "qvel": [0.0] * 6, "torque": [0.0] * 6},
+        "base_achieved":  {"qpos": [0.0, 0.0, 0.0, 0.0], "qvel": [], "torque": []},
     }
 
 
@@ -73,6 +74,7 @@ def dummy_action() -> dict:
         "right_arm": {"qpos": [0.6] * 7},
         "left_ee":   {"qpos": [0.7] * 6},
         "right_ee":  {"qpos": [0.8] * 6},
+        "base_cmd":  {"qpos": [0.0, 0.0, 0.0], "qvel": [], "torque": []},
     }
 
 
