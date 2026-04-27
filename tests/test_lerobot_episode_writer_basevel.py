@@ -5,7 +5,6 @@ then read back the Parquet file and confirm column types, shapes, and values.
 """
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import numpy as np
@@ -23,8 +22,7 @@ from utils.lerobot_episode_writer import (  # type: ignore[import-not-found]
 def tmp_task_dir(tmp_path: Path) -> Path:
     d = tmp_path / "task"
     d.mkdir()
-    yield d
-    shutil.rmtree(d, ignore_errors=True)
+    return d
 
 
 def _make_states() -> dict:
@@ -93,6 +91,51 @@ def test_single_episode_roundtrip_with_fsm(tmp_task_dir: Path):
     fsm_col = table["observation.fsm_mode"].to_pylist()
     assert fsm_col == [1, 1, 1, 2, 2]
     assert str(table.schema.field("observation.fsm_mode").type) == "int8"
+
+
+def test_fsm_mode_no_stale_tail_across_episodes(tmp_task_dir: Path):
+    """Buffer reuse invariant: parquet slice only contains current episode's data."""
+    writer = LeRobotEpisodeWriter(
+        task_dir=str(tmp_task_dir),
+        frequency=30,
+        rerun_log=False,
+        max_episode_sec=1,
+    )
+
+    # Episode 1: 5 frames with fsm_mode = [1,1,1,2,2]
+    assert writer.create_episode()
+    for i in range(5):
+        writer.add_item(
+            colors={"color_0": _make_frame()},
+            states=_make_states(),
+            actions=_make_actions(),
+            fsm_mode=1 if i < 3 else 2,
+        )
+    assert writer.save_episode()
+
+    # Episode 2: 3 frames with fsm_mode = [0,0,0]
+    assert writer.create_episode()
+    for _ in range(3):
+        writer.add_item(
+            colors={"color_0": _make_frame()},
+            states=_make_states(),
+            actions=_make_actions(),
+            fsm_mode=0,
+        )
+    assert writer.save_episode()
+
+    ep_dirs = sorted(p for p in (tmp_task_dir / "_staging").iterdir()
+                     if p.is_dir() and not p.name.endswith(".tmp") and p.name.startswith("episode_"))
+    assert len(ep_dirs) == 2
+
+    # Episode 1 must be exactly 5 rows of [1,1,1,2,2] — stale tail from
+    # episode-2 buffer reuse would manifest here as wrong values.
+    t1 = pq.read_table(ep_dirs[0] / "data.parquet")
+    assert t1["observation.fsm_mode"].to_pylist() == [1, 1, 1, 2, 2]
+
+    # Episode 2 must be exactly 3 rows of [0,0,0] — overwrite-as-you-go semantics.
+    t2 = pq.read_table(ep_dirs[1] / "data.parquet")
+    assert t2["observation.fsm_mode"].to_pylist() == [0, 0, 0]
 
 
 def test_base_achieved_dim_mismatch_aborts(tmp_task_dir: Path):

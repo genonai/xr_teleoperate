@@ -569,7 +569,11 @@ class LeRobotEpisodeWriter:
             raise ValueError(f"filled {kind} offset {offset} != {total_dim}")
 
     def _write_parquet(self, path: Path) -> None:
-        """Write per-episode parquet. Consolidator repacks into v3 chunked layout."""
+        """Write per-episode parquet. Consolidator repacks into v3 chunked layout.
+
+        State and action are stored as fixed-size list<float32>; the
+        consolidator re-emits in the canonical LeRobot v3 column types.
+        """
         import pyarrow as pa
         import pyarrow.parquet as pq
 
@@ -582,11 +586,8 @@ class LeRobotEpisodeWriter:
                 "observation.state": pa.array(
                     state_col, type=pa.list_(pa.float32(), STATE_DIM)
                 ),
-                # 1D numpy arrays go straight into pa.array — no .tolist()
-                # round-trip needed (unlike the 2D state/action list-arrays
-                # above). int8 dtype carries through the numpy → pyarrow
-                # path without an explicit type= kwarg.
-                "observation.fsm_mode": pa.array(self._fsm_mode_buf[:n]),
+                # 1D numpy slice — no .tolist() round-trip (cf. state/action above).
+                "observation.fsm_mode": pa.array(self._fsm_mode_buf[:n], type=pa.int8()),
                 "action": pa.array(
                     action_col, type=pa.list_(pa.float32(), ACTION_DIM)
                 ),
