@@ -275,9 +275,11 @@ class LeRobotEpisodeWriter:
             self._abort_episode(f"state/action flattening failed: {e}")
             return
 
-        # Write fsm_mode after state/action flatten so the row is committed
-        # in the same step. Cast clamps out-of-range ints into int8 range.
-        self._fsm_mode_buf[idx] = np.int8(fsm_mode)
+        # Commit fsm_mode in lockstep with state/action: placed after the
+        # flatten try/except so a flatten-raise leaves this slot unwritten.
+        # Caller passes fsm_mode_to_enum() output (0..6); numpy casts the
+        # Python int to int8 during the in-place buffer write — zero alloc.
+        self._fsm_mode_buf[idx] = fsm_mode
 
         # Extract head-cam BGR frame.
         frame = None if colors is None else colors.get(DEFAULT_CAMERA_INCOMING_KEY)
@@ -311,6 +313,7 @@ class LeRobotEpisodeWriter:
         except queue.Full:
             # Roll back the row we just wrote — the abort will discard the
             # buffers anyway, but this preserves the invariant for unit tests.
+            self._fsm_mode_buf[idx] = 0
             self._n_frames = idx
             self._abort_episode(
                 f"encoder queue overflow (maxsize={self.queue_size}) — "
