@@ -79,7 +79,8 @@ if __name__ == '__main__':
     # Recompute RAMP_TICKS so the resume blend is RAMP_DURATION_SEC of wall-clock
     # at whatever --frequency the operator picked. Without this, RAMP_TICKS=30
     # silently means 0.5 s at 60 Hz or 2.0 s at 15 Hz.
-    fsm.RAMP_TICKS = max(1, int(round(args.frequency * fsm.RAMP_DURATION_SEC)))
+    # Python 3's round() returns int when ndigits is omitted, so no int(...) wrapper.
+    fsm.RAMP_TICKS = max(1, round(args.frequency * fsm.RAMP_DURATION_SEC))
 
     try:
         # setup dds communication domains id
@@ -306,8 +307,16 @@ if __name__ == '__main__':
                 head_img = img_client.get_head_frame()
                 tv_wrapper.render_to_xr(head_img)
 
-        logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
-        arm_ctrl.speed_gradual_max()
+        # If the operator pressed 'q' during the wait above (without ever
+        # pressing 'r'), fsm.STOP is True. Skip the misleading "start
+        # Tracking" log and the motor spin-up, both of which would happen
+        # for no reason — the main loop below would exit on its first
+        # iteration anyway. The finally block still runs proper cleanup.
+        if fsm.STOP:
+            logger_mp.info("⛔ Quit requested before tracking start — skipping motor spin-up.")
+        else:
+            logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
+            arm_ctrl.speed_gradual_max()
         # Pause/ramp tick-local state (initialized once; mutated each tick below)
         prev_paused             = False
         ramp_remaining          = 0

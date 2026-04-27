@@ -108,6 +108,11 @@ def get_state() -> dict:
 
     Used by the IPC server's heartbeat endpoint to broadcast FSM state
     to remote dashboards. Read-only — does not mutate.
+
+    Note: ``RECORD_TOGGLE`` is intentionally omitted. It is a transient
+    edge-triggered command flag (set by :func:`on_press`, cleared by the
+    main loop within one tick), not a steady-state value, so sampling it
+    via the heartbeat would race the consumer that handles the toggle.
     """
     return {
         "START": START,
