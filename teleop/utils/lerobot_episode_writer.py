@@ -7,10 +7,15 @@ layout.
 
 Design contract — see docs/superpowers/specs/2026-04-21-direct-lerobot-recording-design.md
 
-Schema is locked on Unitree_G1_Inspire_HeadOnly_Mono:
-    observation.state / action: float32[26]
+Schema is locked on Unitree_G1_Inspire_HeadOnly_Mono_BaseVel_v1:
+    observation.state: float32[30]
         left_arm.qpos[7] + right_arm.qpos[7] + left_ee.qpos[6] + right_ee.qpos[6]
+        + base_achieved.qpos[4]
+    action: float32[29]
+        left_arm.qpos[7] + right_arm.qpos[7] + left_ee.qpos[6] + right_ee.qpos[6]
+        + base_cmd.qpos[3]
     observation.images.cam_head: 640x480 BGR @ 30 fps (incoming key 'color_0')
+    observation.fsm_mode: int8 (planned for Task 4 — not yet written)
 
 Abort semantics — IL temporal-sync requirement:
     On video-queue overflow, ffmpeg failure, or max-duration breach, the
@@ -518,7 +523,12 @@ class LeRobotEpisodeWriter:
     ) -> None:
         """Write flat qpos fields directly into ``buf[idx, :]``.
 
-        Generic over state (30D) and action (29D) flatten tuples.
+        Generic over state (STATE_DIM) and action (ACTION_DIM) flatten tuples.
+        Validates per-part presence and dim; on failure raises KeyError /
+        ValueError / TypeError which the caller turns into an episode abort.
+        Intentionally zero-alloc on the happy path: numpy's ``buf[idx, a:b] =
+        seq`` assignment copies element-wise into the existing buffer row,
+        without materializing an intermediate concatenated array.
         """
         if data is None:
             raise ValueError(f"{kind} is None")
@@ -530,6 +540,7 @@ class LeRobotEpisodeWriter:
             qpos = part.get("qpos") if isinstance(part, dict) else None
             if qpos is None:
                 raise KeyError(f"{kind}.{part_key}.qpos missing")
+            # Length check — lists, numpy arrays, and other sized iterables.
             try:
                 n = len(qpos)
             except TypeError as e:
@@ -541,6 +552,8 @@ class LeRobotEpisodeWriter:
                     f"{kind}.{part_key}.qpos has length {n}, "
                     f"expected {expected_dim}"
                 )
+            # Direct slice assignment: numpy will cast elements to float32
+            # during the in-place copy. No Python-level array allocation.
             buf[idx, offset : offset + expected_dim] = qpos
             offset += expected_dim
         if offset != total_dim:

@@ -111,7 +111,7 @@ if __name__ == '__main__':
                                "staging artifacts (parquet + MP4 + meta.json) directly; run "
                                "unitree_lerobot.utils.finalize_lerobot_dataset after the session "
                                "to consolidate into the v3 chunked layout. Schema is locked on "
-                               "Unitree_G1_Inspire_HeadOnly_Mono (26D, 1-cam head mono 640x480 "
+                               "Unitree_G1_Inspire_HeadOnly_Mono_BaseVel_v1 (30D state / 29D action, 1-cam head mono 640x480 "
                                "@ 30fps). 'json' is the legacy path — data.json + per-frame "
                                "image files for offline conversion; kept for rollback during "
                                "the post-flip window.")
