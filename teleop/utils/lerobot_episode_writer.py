@@ -48,22 +48,30 @@ except AttributeError:
 # Constants — see spec §2 (locked schema) and §4 (hot-path mechanics)
 # ---------------------------------------------------------------------------
 
-ACTION_DIM = 26
-STATE_DIM = 26
-# 26D field order: left_arm.qpos (7) + right_arm.qpos (7)
-#                + left_ee.qpos  (6) + right_ee.qpos  (6)
-FLATTEN_PARTS: tuple[tuple[str, int], ...] = (
+STATE_DIM = 30
+ACTION_DIM = 29
+# State: left_arm(7) + right_arm(7) + left_ee(6) + right_ee(6) + base_achieved(4)
+FLATTEN_PARTS_STATE: tuple[tuple[str, int], ...] = (
     ("left_arm", 7),
     ("right_arm", 7),
     ("left_ee", 6),
     ("right_ee", 6),
+    ("base_achieved", 4),
+)
+# Action: left_arm(7) + right_arm(7) + left_ee(6) + right_ee(6) + base_cmd(3)
+FLATTEN_PARTS_ACTION: tuple[tuple[str, int], ...] = (
+    ("left_arm", 7),
+    ("right_arm", 7),
+    ("left_ee", 6),
+    ("right_ee", 6),
+    ("base_cmd", 3),
 )
 
 DEFAULT_FPS = 30
 DEFAULT_IMAGE_SIZE = (640, 480)  # (W, H)
 DEFAULT_MAX_EPISODE_SEC = 60
 DEFAULT_QUEUE_HEADROOM_SEC = 2  # bounded queue size = fps * this
-DEFAULT_ROBOT_TYPE = "Unitree_G1_Inspire_HeadOnly_Mono"
+DEFAULT_ROBOT_TYPE = "Unitree_G1_Inspire_HeadOnly_Mono_BaseVel_v1"
 DEFAULT_CAMERA_INCOMING_KEY = "color_0"  # per ROBOT_CONFIGS camera_to_image_key
 CAM_FEATURE_KEY = "observation.images.cam_head"
 
@@ -242,14 +250,20 @@ class LeRobotEpisodeWriter:
         # consistent with what's been sent to ffmpeg.
         idx = self._n_frames
 
-        # Fill 26D state + action directly into preallocated buffer slices.
+        # Fill state + action directly into preallocated buffer slices.
         # The prior _flatten_26d() helper allocated a fresh per-frame list +
         # numpy scratch array, contradicting the "zero hot-path allocation"
         # invariant advertised in the spec. Writing straight into the buffer
         # keeps the hot path free of Python-level allocations per frame.
         try:
-            self._fill_26d_row(self._state_buf, idx, states, kind="state")
-            self._fill_26d_row(self._action_buf, idx, actions, kind="action")
+            self._fill_flat_row(
+                self._state_buf, idx, states, kind="state",
+                parts=FLATTEN_PARTS_STATE, total_dim=STATE_DIM,
+            )
+            self._fill_flat_row(
+                self._action_buf, idx, actions, kind="action",
+                parts=FLATTEN_PARTS_ACTION, total_dim=ACTION_DIM,
+            )
         except (KeyError, ValueError, TypeError) as e:
             self._abort_episode(f"state/action flattening failed: {e}")
             return
@@ -493,28 +507,29 @@ class LeRobotEpisodeWriter:
         except Exception as e:
             self._worker_error = e
 
-    def _fill_26d_row(
-        self, buf: np.ndarray, idx: int, data: dict | None, kind: str
+    def _fill_flat_row(
+        self,
+        buf: np.ndarray,
+        idx: int,
+        data: dict | None,
+        kind: str,
+        parts: tuple[tuple[str, int], ...],
+        total_dim: int,
     ) -> None:
-        """Write 26D qpos fields directly into ``buf[idx, :]``.
+        """Write flat qpos fields directly into ``buf[idx, :]``.
 
-        Validates per-part presence and dim; on failure raises KeyError /
-        ValueError / TypeError which the caller turns into an episode abort.
-        Intentionally zero-alloc on the happy path: numpy's ``buf[idx, a:b] =
-        seq`` assignment copies element-wise into the existing buffer row,
-        without materializing an intermediate concatenated array.
+        Generic over state (30D) and action (29D) flatten tuples.
         """
         if data is None:
             raise ValueError(f"{kind} is None")
         offset = 0
-        for part_key, expected_dim in FLATTEN_PARTS:
+        for part_key, expected_dim in parts:
             part = data.get(part_key)
             if part is None:
                 raise KeyError(f"{kind}.{part_key} missing")
             qpos = part.get("qpos") if isinstance(part, dict) else None
             if qpos is None:
                 raise KeyError(f"{kind}.{part_key}.qpos missing")
-            # Length check — lists, numpy arrays, and other sized iterables.
             try:
                 n = len(qpos)
             except TypeError as e:
@@ -526,12 +541,10 @@ class LeRobotEpisodeWriter:
                     f"{kind}.{part_key}.qpos has length {n}, "
                     f"expected {expected_dim}"
                 )
-            # Direct slice assignment: numpy will cast elements to float32
-            # during the in-place copy. No Python-level array allocation.
             buf[idx, offset : offset + expected_dim] = qpos
             offset += expected_dim
-        if offset != 26:
-            raise ValueError(f"filled {kind} offset {offset} != 26")
+        if offset != total_dim:
+            raise ValueError(f"filled {kind} offset {offset} != {total_dim}")
 
     def _write_parquet(self, path: Path) -> None:
         """Write per-episode parquet. Consolidator repacks into v3 chunked layout."""
