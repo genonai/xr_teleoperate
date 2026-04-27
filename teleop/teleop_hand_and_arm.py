@@ -20,6 +20,7 @@ from teleimager.image_client import ImageClient
 from teleop.utils.episode_writer import EpisodeWriter as JsonEpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
+from teleop import fsm  # FSM globals, on_press, get_state — see teleop/fsm.py
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -30,68 +31,14 @@ def publish_reset_category(category: int, publisher): # Scene Reset signal
     publisher.Write(msg)
     logger_mp.info(f"published reset category: {category}")
 
-# state transition
-START          = False  # Enable to start robot following VR user motion
-STOP           = False  # Enable to begin system exit procedure
-READY          = False  # Ready to (1) enter START state, (2) enter RECORD_RUNNING state
-RECORD_RUNNING = False  # True if [Recording]
-RECORD_TOGGLE  = False  # Toggle recording state
-PAUSED              = False  # True while [p] paused — robot holds last commanded pose
-RAMP_DURATION_SEC   = 1.0    # Wall-clock target for the resume ramp
-RAMP_TICKS          = 30     # Recomputed from args.frequency below; placeholder = 30 ticks @ 30 Hz
-#  -------        ---------                -----------                -----------            ---------
-#   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
-#  -------        ---------      |         -----------      |         -----------      |     ---------
-#   START           True         |manual      True          |manual      True          |        True
-#   READY           True         |set         False         |set         False         |auto    True
-#   RECORD_RUNNING  False        |to          True          |to          False         |        False
-#                                ∨                          ∨                          ∨
-#   RECORD_TOGGLE   False       True          False        True          False                  False
-#  -------        ---------                -----------                 -----------            ---------
-#  ==> manual: when READY is True, set RECORD_TOGGLE=True to transition.
-#  --> auto  : Auto-transition after saving data.
-#
-#  [p] Pause branch (only from [Ready], not from [Recording]):
-#     [Ready]  --p-->  [Paused]  --p-->  [Resuming (ramp, RAMP_TICKS ticks)]  -->  [Ready]
-#  During [Paused]: arm re-sends frozen target, hand writes skipped, [s] rejected.
-#  During [Resuming]: alpha sweeps 1/RAMP_TICKS → 1.0, blending frozen → fresh.
-
-def on_press(key):
-    global STOP, START, RECORD_TOGGLE, PAUSED
-    if key == 'r':
-        START = True
-    elif key == 'q':
-        START = False
-        STOP = True
-    elif key == 's' and START and not PAUSED:
-        RECORD_TOGGLE = True
-    elif key == 'p' and START and not RECORD_RUNNING and not RECORD_TOGGLE:
-        # Also gate on RECORD_TOGGLE: closes the sub-tick race where `s` flips
-        # RECORD_TOGGLE=True but the main loop has not yet promoted it to
-        # RECORD_RUNNING=True — otherwise a `p` pressed between those two
-        # events would sneak paused frames into the new episode.
-        PAUSED = not PAUSED
-        # Synchronous feedback so a fast double-press (where both flips happen
-        # between two main-loop ticks → no edge detected → no ⏸/▶ log) still
-        # tells the operator that each press registered.
-        logger_mp.info(f"[on_press] PAUSED → {PAUSED}")
-    elif key in ('s', 'p'):
-        # Key is known but its guard rejected it (not tracking, wrong state, etc.)
-        logger_mp.warning(f"[on_press] {key} rejected — guard not satisfied for current state.")
-    else:
-        # Key is not bound to any action in this FSM.
-        logger_mp.warning(f"[on_press] {key} — no action defined for this key.")
-
-def get_state() -> dict:
-    """Return current heartbeat state"""
-    global START, STOP, RECORD_RUNNING, READY, PAUSED
-    return {
-        "START": START,
-        "STOP": STOP,
-        "READY": READY,
-        "RECORD_RUNNING": RECORD_RUNNING,
-        "PAUSED": PAUSED,
-    }
+# FSM globals (START / STOP / READY / RECORD_RUNNING / RECORD_TOGGLE / PAUSED),
+# the `on_press` handler, the `get_state` heartbeat dict, and the
+# RAMP_TICKS / RAMP_DURATION_SEC constants all live in teleop/fsm.py.
+# Reference state via `fsm.NAME` so mutations performed by `on_press`
+# (running on the sshkeyboard listener thread) are visible here.
+# Public callables for sshkeyboard / IPC:
+on_press = fsm.on_press
+get_state = fsm.get_state
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -132,7 +79,7 @@ if __name__ == '__main__':
     # Recompute RAMP_TICKS so the resume blend is RAMP_DURATION_SEC of wall-clock
     # at whatever --frequency the operator picked. Without this, RAMP_TICKS=30
     # silently means 0.5 s at 60 Hz or 2.0 s at 15 Hz.
-    RAMP_TICKS = max(1, int(round(args.frequency * RAMP_DURATION_SEC)))
+    fsm.RAMP_TICKS = max(1, int(round(args.frequency * fsm.RAMP_DURATION_SEC)))
 
     try:
         # setup dds communication domains id
@@ -352,8 +299,8 @@ if __name__ == '__main__':
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
-        READY = True                  # now ready to (1) enter START state
-        while not START and not STOP: # wait for start or stop signal.
+        fsm.READY = True                  # now ready to (1) enter START state
+        while not fsm.START and not fsm.STOP: # wait for start or stop signal.
             time.sleep(0.033)
             if camera_config['head_camera']['enable_zmq'] and xr_need_local_img:
                 head_img = img_client.get_head_frame()
@@ -371,17 +318,17 @@ if __name__ == '__main__':
         frozen_hand_snapshot    = {}     # keyed 'left'/'right' — value type matches EE branch
         last_commanded_hand     = {}     # keyed 'left'/'right' — last value we wrote to shared mem
         # main loop. robot start to follow VR user's motion
-        while not STOP:
+        while not fsm.STOP:
             start_time = time.time()
 
             # --- Pause/ramp top-of-tick block -----------------------------------------
             # Stable per-tick snapshot of the async-mutated pause flag — use the local
             # for the rest of the tick so all downstream branches see one consistent
-            # value even if the keyboard thread flips PAUSED mid-tick.
-            # (RECORD_RUNNING is deliberately NOT snapshotted
+            # value even if the keyboard thread flips fsm.PAUSED mid-tick.
+            # (fsm.RECORD_RUNNING is deliberately NOT snapshotted
             # here: the downstream recording append at line ~450 needs the freshest
-            # value, which may change during this tick when RECORD_TOGGLE is handled.)
-            current_tick_paused = PAUSED
+            # value, which may change during this tick when fsm.RECORD_TOGGLE is handled.)
+            current_tick_paused = fsm.PAUSED
 
             entering_pause = current_tick_paused and not prev_paused
             leaving_pause  = (not current_tick_paused) and prev_paused
@@ -389,8 +336,8 @@ if __name__ == '__main__':
             if entering_pause:
                 logger_mp.info("⏸ PAUSED — robot holding last pose. Press [p] to resume.")
             if leaving_pause:
-                ramp_remaining = RAMP_TICKS
-                logger_mp.info(f"▶ Resumed — ramping to current VR pose over {RAMP_TICKS/args.frequency:.1f}s.")
+                ramp_remaining = fsm.RAMP_TICKS
+                logger_mp.info(f"▶ Resumed — ramping to current VR pose over {fsm.RAMP_TICKS/args.frequency:.1f}s.")
 
             prev_paused = current_tick_paused
 
@@ -399,7 +346,7 @@ if __name__ == '__main__':
                 alpha = 0.0
             elif ramp_remaining > 0:
                 ramp_remaining -= 1
-                alpha = (RAMP_TICKS - ramp_remaining) / RAMP_TICKS   # 1/30, 2/30, ..., 30/30
+                alpha = (fsm.RAMP_TICKS - ramp_remaining) / fsm.RAMP_TICKS   # 1/30, 2/30, ..., 30/30
             else:
                 alpha = 1.0
             # --- end pause/ramp top-of-tick block ------------------------------------
@@ -418,15 +365,15 @@ if __name__ == '__main__':
                     right_wrist_img = img_client.get_right_wrist_frame()
 
             # record mode
-            if args.record and RECORD_TOGGLE:
-                RECORD_TOGGLE = False
-                if not RECORD_RUNNING:
+            if args.record and fsm.RECORD_TOGGLE:
+                fsm.RECORD_TOGGLE = False
+                if not fsm.RECORD_RUNNING:
                     if recorder.create_episode():
-                        RECORD_RUNNING = True
+                        fsm.RECORD_RUNNING = True
                     else:
                         logger_mp.error("Failed to create episode. Recording not started.")
                 else:
-                    RECORD_RUNNING = False
+                    fsm.RECORD_RUNNING = False
                     recorder.save_episode()
                     if args.sim:
                         publish_reset_category(1, reset_pose_publisher)
@@ -555,8 +502,8 @@ if __name__ == '__main__':
             if args.input_mode == "controller" and args.motion:
                 # quit teleoperate
                 if tele_data.right_ctrl_aButton:
-                    START = False
-                    STOP = True
+                    fsm.START = False
+                    fsm.STOP = True
                 # command robot to enter damping mode. soft emergency stop function
                 if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
                     loco_wrapper.Damp()
@@ -613,7 +560,7 @@ if __name__ == '__main__':
 
             # record data
             if args.record:
-                READY = recorder.is_ready() # now ready to (2) enter RECORD_RUNNING state
+                fsm.READY = recorder.is_ready() # now ready to (2) enter RECORD_RUNNING state
                 # dex hand or gripper
                 if args.ee == "dex3" and args.input_mode == "hand":
                     with dual_hand_data_lock:
@@ -670,7 +617,7 @@ if __name__ == '__main__':
                 right_arm_state = current_lr_arm_q[-7:]
                 left_arm_action = sol_q[:7]
                 right_arm_action = sol_q[-7:]
-                if RECORD_RUNNING:
+                if fsm.RECORD_RUNNING:
                     colors = {}
                     depths = {}
                     if camera_config['head_camera']['binocular']:
@@ -770,7 +717,7 @@ if __name__ == '__main__':
                             "❌ Episode aborted by writer — resetting "
                             "RECORD_RUNNING. Press [s] to start a fresh take."
                         )
-                        RECORD_RUNNING = False
+                        fsm.RECORD_RUNNING = False
 
             current_time = time.time()
             time_elapsed = current_time - start_time
