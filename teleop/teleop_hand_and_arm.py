@@ -36,8 +36,9 @@ STOP           = False  # Enable to begin system exit procedure
 READY          = False  # Ready to (1) enter START state, (2) enter RECORD_RUNNING state
 RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
-PAUSED         = False  # True while [p] paused — robot holds last commanded pose
-RAMP_TICKS     = 30     # Resume blend window (1.0s @ 30Hz)
+PAUSED              = False  # True while [p] paused — robot holds last commanded pose
+RAMP_DURATION_SEC   = 1.0    # Wall-clock target for the resume ramp
+RAMP_TICKS          = 30     # Recomputed from args.frequency below; placeholder = 30 ticks @ 30 Hz
 #  -------        ---------                -----------                -----------            ---------
 #   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
 #  -------        ---------      |         -----------      |         -----------      |     ---------
@@ -123,6 +124,11 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     logger_mp.info(f"args: {args}")
+
+    # Recompute RAMP_TICKS so the resume blend is RAMP_DURATION_SEC of wall-clock
+    # at whatever --frequency the operator picked. Without this, RAMP_TICKS=30
+    # silently means 0.5 s at 60 Hz or 2.0 s at 15 Hz.
+    RAMP_TICKS = max(1, int(round(args.frequency * RAMP_DURATION_SEC)))
 
     try:
         # setup dds communication domains id
