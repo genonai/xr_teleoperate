@@ -56,3 +56,32 @@ def fsm_mode_to_enum(raw_mode: int) -> int:
     intermediate squat-transition IDs should be added to FSM_ENUM → 6.
     """
     return FSM_ENUM.get(int(raw_mode), 0)
+
+
+def read_sport_snapshot(box: list) -> tuple[list[float], int]:
+    """Read latest SportModeState snapshot from a single-element box.
+
+    box[0] is either None (no message yet) or a 5-tuple
+    (mode:int, vx, vy, vz, yaw_speed:float).
+    Returns (base_achieved [vx, vy, vz, yaw_speed], fsm_enum).
+    Single attribute load — relies on CPython GIL atomicity of list-index
+    assignment, no lock required.
+    """
+    snap = box[0]
+    if snap is None:
+        return [0.0, 0.0, 0.0, 0.0], 0
+    mode, vx, vy, vz, yaw_speed = snap
+    return [vx, vy, vz, yaw_speed], fsm_mode_to_enum(mode)
+
+
+def read_wireless_snapshot(box: list) -> list[float]:
+    """Read latest WirelessController snapshot, pipe through r3_stick_to_cmd_vel.
+
+    box[0] is either None or a 3-tuple (lx, ly, rx) with raw stick values
+    (deadband + scaling NOT pre-applied — both are r3_stick_to_cmd_vel's job).
+    """
+    snap = box[0]
+    if snap is None:
+        return [0.0, 0.0, 0.0]
+    lx, ly, rx = snap
+    return list(r3_stick_to_cmd_vel(lx, ly, rx))

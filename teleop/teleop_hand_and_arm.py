@@ -12,7 +12,14 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize # dds 
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber  # dds
+from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_, WirelessController_
+from teleop.utils.base_velocity import (
+    read_sport_snapshot,
+    read_wireless_snapshot,
+    fsm_mode_to_enum,
+    r3_stick_to_cmd_vel,
+)
 from televuer import TeleVuerWrapper
 from teleop.robot_control.robot_arm import G1_29_ArmController, G1_23_ArmController, H1_2_ArmController, H1_ArmController
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK
@@ -130,6 +137,30 @@ if __name__ == '__main__':
             ChannelFactoryInitialize(1, networkInterface=args.network_interface)
         else:
             ChannelFactoryInitialize(0, networkInterface=args.network_interface)
+
+        # Latest-sample DDS subscribers for base-velocity recording (spec §6).
+        # Atomic single-element-list assignment is GIL-atomic in CPython, so the
+        # record loop gets a consistent tuple snapshot without a lock.
+        # Queue depth 1: we only ever read the latest; queued backlog is waste.
+        latest_sport = [None]      # (mode:int, vx, vy, vz, yaw_speed)
+        latest_wireless = [None]   # (lx, ly, rx)
+
+        def _sport_cb(msg):
+            latest_sport[0] = (
+                int(msg.mode),
+                float(msg.velocity[0]),
+                float(msg.velocity[1]),
+                float(msg.velocity[2]),
+                float(msg.yaw_speed),
+            )
+
+        def _wireless_cb(msg):
+            latest_wireless[0] = (float(msg.lx), float(msg.ly), float(msg.rx))
+
+        sport_sub = ChannelSubscriber("rt/sportmodestate", SportModeState_)
+        sport_sub.Init(_sport_cb, 1)
+        wireless_sub = ChannelSubscriber("rt/wirelesscontroller", WirelessController_)
+        wireless_sub.Init(_wireless_cb, 1)
 
         # ipc communication mode. client usage: see utils/ipc.py
         if args.ipc:
@@ -677,61 +708,87 @@ if __name__ == '__main__':
                                 colors[f"color_{2}"] = right_wrist_img.bgr
                             else:
                                 logger_mp.warning("Right wrist image is None!")
+                    # Base-velocity capture (spec §6). Atomic single-read of the
+                    # latest DDS snapshot; the box[0] load is GIL-atomic in
+                    # CPython so no lock is needed. None-fallbacks emit zeros
+                    # so the row is always well-formed (frozen-stale invariant).
+                    base_achieved, fsm_enum = read_sport_snapshot(latest_sport)
+                    base_cmd = read_wireless_snapshot(latest_wireless)
+
                     states = {
-                        "left_arm": {                                                                    
+                        "left_arm": {
                             "qpos":   left_arm_state.tolist(),    # numpy.array -> list
-                            "qvel":   [],                          
-                            "torque": [],                        
-                        }, 
-                        "right_arm": {                                                                    
-                            "qpos":   right_arm_state.tolist(),       
-                            "qvel":   [],                          
-                            "torque": [],                         
-                        },                        
-                        "left_ee": {                                                                    
-                            "qpos":   left_ee_state,           
-                            "qvel":   [],                           
-                            "torque": [],                          
-                        }, 
-                        "right_ee": {                                                                    
-                            "qpos":   right_ee_state,       
-                            "qvel":   [],                           
-                            "torque": [],  
-                        }, 
+                            "qvel":   [],
+                            "torque": [],
+                        },
+                        "right_arm": {
+                            "qpos":   right_arm_state.tolist(),
+                            "qvel":   [],
+                            "torque": [],
+                        },
+                        "left_ee": {
+                            "qpos":   left_ee_state,
+                            "qvel":   [],
+                            "torque": [],
+                        },
+                        "right_ee": {
+                            "qpos":   right_ee_state,
+                            "qvel":   [],
+                            "torque": [],
+                        },
                         "body": {
                             "qpos": current_body_state,
-                        }, 
+                        },
+                        "base_achieved": {
+                            "qpos": base_achieved,
+                            "qvel": [],
+                            "torque": [],
+                        },
                     }
                     actions = {
-                        "left_arm": {                                   
-                            "qpos":   left_arm_action.tolist(),       
-                            "qvel":   [],       
-                            "torque": [],      
-                        }, 
-                        "right_arm": {                                   
-                            "qpos":   right_arm_action.tolist(),       
-                            "qvel":   [],       
-                            "torque": [],       
-                        },                         
-                        "left_ee": {                                   
-                            "qpos":   left_hand_action,       
-                            "qvel":   [],       
-                            "torque": [],       
-                        }, 
-                        "right_ee": {                                   
-                            "qpos":   right_hand_action,       
-                            "qvel":   [],       
-                            "torque": [], 
-                        }, 
+                        "left_arm": {
+                            "qpos":   left_arm_action.tolist(),
+                            "qvel":   [],
+                            "torque": [],
+                        },
+                        "right_arm": {
+                            "qpos":   right_arm_action.tolist(),
+                            "qvel":   [],
+                            "torque": [],
+                        },
+                        "left_ee": {
+                            "qpos":   left_hand_action,
+                            "qvel":   [],
+                            "torque": [],
+                        },
+                        "right_ee": {
+                            "qpos":   right_hand_action,
+                            "qvel":   [],
+                            "torque": [],
+                        },
                         "body": {
                             "qpos": current_body_action,
-                        }, 
+                        },
+                        "base_cmd": {
+                            "qpos": base_cmd,
+                            "qvel": [],
+                            "torque": [],
+                        },
                     }
                     if args.sim:
                         sim_state = sim_state_subscriber.read_data()
-                        recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, sim_state=sim_state)
+                        recorder.add_item(
+                            colors=colors, depths=depths,
+                            states=states, actions=actions,
+                            fsm_mode=fsm_enum,
+                            sim_state=sim_state,
+                        )
                     else:
-                        recorder.add_item(colors=colors, depths=depths, states=states, actions=actions)
+                        recorder.add_item(
+                            colors=colors, depths=depths,
+                            states=states, actions=actions,
+                            fsm_mode=fsm_enum,
+                        )
 
                     # LeRobot writer can abort the episode mid-recording (queue
                     # overflow, max-duration, malformed input) — transition the
