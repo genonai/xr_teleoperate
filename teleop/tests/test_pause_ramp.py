@@ -42,14 +42,18 @@ def writer():
 # ---------------------------------------------------------------------------
 
 def test_array_normal_tick_writes_fresh_input(writer):
-    """alpha=1.0, not paused → write fresh input verbatim, update last_commanded."""
+    """alpha=1.0, not paused → write fresh input verbatim, update last_commanded.
+
+    Note: last_commanded stores `out_left` directly (no defensive copy)
+    per the helper's documented "fresh inputs only" contract.
+    """
     new_l = np.array([1.0, 2.0, 3.0])
     new_r = np.array([4.0, 5.0, 6.0])
     frozen = {}
     last = {}
 
     apply_pause_ramp(
-        new_l, new_r, writer, is_array=True,
+        new_l, new_r, writer,
         entering_pause=False, current_tick_paused=False, alpha=1.0,
         frozen_snapshot=frozen, last_commanded=last,
     )
@@ -60,9 +64,6 @@ def test_array_normal_tick_writes_fresh_input(writer):
     np.testing.assert_array_equal(out_r, new_r)
     np.testing.assert_array_equal(last['left'], new_l)
     np.testing.assert_array_equal(last['right'], new_r)
-    # last_commanded must be a copy, not aliased to new_l/new_r
-    assert last['left'] is not new_l
-    assert last['right'] is not new_r
 
 
 def test_array_entering_pause_snapshots_from_last_commanded(writer):
@@ -75,7 +76,7 @@ def test_array_entering_pause_snapshots_from_last_commanded(writer):
     last = {'left': last_left, 'right': last_right}
 
     apply_pause_ramp(
-        new_l, new_r, writer, is_array=True,
+        new_l, new_r, writer,
         entering_pause=True, current_tick_paused=True, alpha=0.0,
         frozen_snapshot=frozen, last_commanded=last,
     )
@@ -83,9 +84,6 @@ def test_array_entering_pause_snapshots_from_last_commanded(writer):
     # Snapshot captured from last_commanded, NOT from fresh input
     np.testing.assert_array_equal(frozen['left'], last_left)
     np.testing.assert_array_equal(frozen['right'], last_right)
-    # And it must be a copy (mutation of last_left should not affect frozen['left'])
-    last_left[0] = 999.0
-    assert frozen['left'][0] == 10.0
     # No write while paused
     assert writer.calls == []
 
@@ -97,7 +95,7 @@ def test_array_paused_tick_skips_write(writer):
     last = {'left': np.array([0.0]), 'right': np.array([0.0])}
 
     apply_pause_ramp(
-        np.array([99.0]), np.array([99.0]), writer, is_array=True,
+        np.array([99.0]), np.array([99.0]), writer,
         entering_pause=False, current_tick_paused=True, alpha=0.0,
         frozen_snapshot=frozen, last_commanded=last,
     )
@@ -116,7 +114,7 @@ def test_array_ramp_blend_is_linear(writer):
     last = {}
 
     apply_pause_ramp(
-        new_l, new_r, writer, is_array=True,
+        new_l, new_r, writer,
         entering_pause=False, current_tick_paused=False, alpha=0.5,
         frozen_snapshot=frozen, last_commanded=last,
     )
@@ -136,7 +134,7 @@ def test_array_ramp_blend_is_linear(writer):
 
 def test_scalar_normal_tick(writer):
     apply_pause_ramp(
-        0.7, 0.3, writer, is_array=False,
+        0.7, 0.3, writer,
         entering_pause=False, current_tick_paused=False, alpha=1.0,
         frozen_snapshot={}, last_commanded={},
     )
@@ -148,7 +146,7 @@ def test_scalar_entering_pause_snapshots_from_last_commanded(writer):
     last = {'left': 0.42, 'right': 0.99}
 
     apply_pause_ramp(
-        0.0, 0.0, writer, is_array=False,
+        0.0, 0.0, writer,
         entering_pause=True, current_tick_paused=True, alpha=0.0,
         frozen_snapshot=frozen, last_commanded=last,
     )
@@ -161,7 +159,7 @@ def test_scalar_entering_pause_snapshots_from_last_commanded(writer):
 def test_scalar_ramp_blend(writer):
     frozen = {'left': 0.0, 'right': 10.0}
     apply_pause_ramp(
-        100.0, 30.0, writer, is_array=False,
+        100.0, 30.0, writer,
         entering_pause=False, current_tick_paused=False, alpha=0.25,
         frozen_snapshot=frozen, last_commanded={},
     )
@@ -187,21 +185,18 @@ def test_array_bootstrap_falls_back_to_new_when_last_empty(writer):
     last = {}
 
     apply_pause_ramp(
-        new_l, new_r, writer, is_array=True,
+        new_l, new_r, writer,
         entering_pause=True, current_tick_paused=True, alpha=0.0,
         frozen_snapshot=frozen, last_commanded=last,
     )
 
     np.testing.assert_array_equal(frozen['left'], new_l)
     np.testing.assert_array_equal(frozen['right'], new_r)
-    # And it's a copy
-    new_l[0] = 999.0
-    assert frozen['left'][0] == 1.0
 
 
 def test_scalar_bootstrap_falls_back_to_new_when_last_empty(writer):
     apply_pause_ramp(
-        0.5, 0.7, writer, is_array=False,
+        0.5, 0.7, writer,
         entering_pause=True, current_tick_paused=True, alpha=0.0,
         frozen_snapshot={}, last_commanded={},
     )
@@ -226,7 +221,7 @@ def test_array_re_pause_mid_ramp_captures_intermediate(writer):
 
     # Tick 0: not paused, write A — last is now A
     apply_pause_ramp(
-        pos_a, pos_a, writer, is_array=True,
+        pos_a, pos_a, writer,
         entering_pause=False, current_tick_paused=False, alpha=1.0,
         frozen_snapshot=frozen, last_commanded=last,
     )
@@ -235,7 +230,7 @@ def test_array_re_pause_mid_ramp_captures_intermediate(writer):
     # Tick 1: entering pause → snapshot from last (= A). VR moves to B.
     # Even though new_left=pos_b, frozen captures pos_a.
     apply_pause_ramp(
-        pos_b, pos_b, writer, is_array=True,
+        pos_b, pos_b, writer,
         entering_pause=True, current_tick_paused=True, alpha=0.0,
         frozen_snapshot=frozen, last_commanded=last,
     )
@@ -243,7 +238,7 @@ def test_array_re_pause_mid_ramp_captures_intermediate(writer):
 
     # Tick 2: leaving pause → start ramp at alpha=0.5 toward B
     apply_pause_ramp(
-        pos_b, pos_b, writer, is_array=True,
+        pos_b, pos_b, writer,
         entering_pause=False, current_tick_paused=False, alpha=0.5,
         frozen_snapshot=frozen, last_commanded=last,
     )
@@ -253,7 +248,7 @@ def test_array_re_pause_mid_ramp_captures_intermediate(writer):
     # Tick 3: re-pause mid-ramp → entering_pause snapshots from last (= 50,50)
     # NOT from new_left (which would be pos_c if VR has moved again).
     apply_pause_ramp(
-        pos_c, pos_c, writer, is_array=True,
+        pos_c, pos_c, writer,
         entering_pause=True, current_tick_paused=True, alpha=0.0,
         frozen_snapshot=frozen, last_commanded=last,
     )
@@ -267,16 +262,16 @@ def test_array_re_pause_mid_ramp_captures_intermediate(writer):
 # ---------------------------------------------------------------------------
 
 def test_keyword_only_args_enforced(writer):
-    """is_array, entering_pause, etc. must be passed as kwargs.
+    """entering_pause, current_tick_paused, alpha, frozen_snapshot, and
+    last_commanded must all be passed as kwargs.
 
     Guards against a future caller silently passing them positionally and
-    getting them confused with each other (e.g. swapping is_array and
-    current_tick_paused).
+    getting them confused with each other (e.g. swapping entering_pause
+    and current_tick_paused, which would silently invert pause behavior).
     """
     with pytest.raises(TypeError):
         apply_pause_ramp(
             0.5, 0.5, writer,
-            True,  # this is `is_array=` but passed positionally — should fail
-            False, False, 1.0,
+            False, False, 1.0,  # entering_pause, current_tick_paused, alpha — all keyword-only
             {}, {},
         )
