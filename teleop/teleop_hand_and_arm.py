@@ -43,8 +43,9 @@ STOP           = False  # Enable to begin system exit procedure
 READY          = False  # Ready to (1) enter START state, (2) enter RECORD_RUNNING state
 RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
-PAUSED         = False  # True while [p] paused — robot holds last commanded pose
-RAMP_TICKS     = 30     # Resume blend window (1.0s @ 30Hz)
+PAUSED              = False  # True while [p] paused — robot holds last commanded pose
+RAMP_DURATION_SEC   = 1.0    # Wall-clock target for the resume ramp
+RAMP_TICKS          = 30     # Recomputed from args.frequency below; placeholder = 30 ticks @ 30 Hz
 #  -------        ---------                -----------                -----------            ---------
 #   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
 #  -------        ---------      |         -----------      |         -----------      |     ---------
@@ -77,6 +78,10 @@ def on_press(key):
         # RECORD_RUNNING=True — otherwise a `p` pressed between those two
         # events would sneak paused frames into the new episode.
         PAUSED = not PAUSED
+        # Synchronous feedback so a fast double-press (where both flips happen
+        # between two main-loop ticks → no edge detected → no ⏸/▶ log) still
+        # tells the operator that each press registered.
+        logger_mp.info(f"[on_press] PAUSED → {PAUSED}")
     elif key in ('s', 'p'):
         # Key is known but its guard rejected it (not tracking, wrong state, etc.)
         logger_mp.warning(f"[on_press] {key} rejected — guard not satisfied for current state.")
@@ -130,6 +135,11 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     logger_mp.info(f"args: {args}")
+
+    # Recompute RAMP_TICKS so the resume blend is RAMP_DURATION_SEC of wall-clock
+    # at whatever --frequency the operator picked. Without this, RAMP_TICKS=30
+    # silently means 0.5 s at 60 Hz or 2.0 s at 15 Hz.
+    RAMP_TICKS = max(1, int(round(args.frequency * RAMP_DURATION_SEC)))
 
     try:
         # setup dds communication domains id
@@ -398,8 +408,10 @@ if __name__ == '__main__':
             start_time = time.time()
 
             # --- Pause/ramp top-of-tick block -----------------------------------------
-            # Single atomic read of the async-mutated pause flag — use the local for
-            # the rest of the tick. (RECORD_RUNNING is deliberately NOT snapshotted
+            # Stable per-tick snapshot of the async-mutated pause flag — use the local
+            # for the rest of the tick so all downstream branches see one consistent
+            # value even if the keyboard thread flips PAUSED mid-tick.
+            # (RECORD_RUNNING is deliberately NOT snapshotted
             # here: the downstream recording append at line ~450 needs the freshest
             # value, which may change during this tick when RECORD_TOGGLE is handled.)
             current_tick_paused = PAUSED
@@ -601,6 +613,14 @@ if __name__ == '__main__':
             if entering_pause:
                 # Freeze at the pose we actually commanded LAST tick (C0-continuous even
                 # if we were mid-ramp). Bootstrap with sol_q on the very first tick.
+                #
+                # Note: arm bootstrap falls back to fresh IK output (sol_q), while hand
+                # bootstraps fall back to fresh VR input (new_left/new_right). The asymmetry
+                # is benign because in both cases the bootstrap value is unused while paused
+                # — paused arm re-sends frozen, paused hand skips writes — and is only the
+                # blend-from anchor on resume, which gets overwritten by `last_commanded_*`
+                # at every non-paused tick. So the first-tick fallback can never produce
+                # observable behavior.
                 frozen_sol_q     = (last_commanded_q     if last_commanded_q     is not None else sol_q).copy()
                 frozen_sol_tauff = (last_commanded_tauff if last_commanded_tauff is not None else sol_tauff).copy()
 
@@ -608,6 +628,13 @@ if __name__ == '__main__':
                 target_q, target_tauff = frozen_sol_q, frozen_sol_tauff
             elif alpha < 1.0:
                 target_q     = frozen_sol_q     + alpha * (sol_q     - frozen_sol_q)
+                # Linearly blending tauff is an approximation: tauff is feedforward
+                # dynamics (pose- and velocity-dependent), not a pose state, so
+                # interpolating it across the frozen→fresh boundary is not
+                # physically rigorous. Acceptable here because the arm controller's
+                # PD term dominates during the 1 s ramp window — tauff is a hint,
+                # not the primary command — and magnitudes are small at the
+                # near-quasistatic teleop rates we run.
                 target_tauff = frozen_sol_tauff + alpha * (sol_tauff - frozen_sol_tauff)
             else:
                 target_q, target_tauff = sol_q, sol_tauff
