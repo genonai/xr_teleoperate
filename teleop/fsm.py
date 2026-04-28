@@ -34,6 +34,8 @@ FSM diagram::
       READY           True                      False                       False                True
       RECORD_RUNNING  False                     True                        False                False
       RECORD_TOGGLE   False         True        False           True        False                False
+      PAUSED          False                     False                       False                False    (True only in [Paused], see branch below)
+      STOP            False                     False                       False                False    (True only after `q` press, terminates main loop)
 
   ==> manual: when READY is True, set RECORD_TOGGLE=True to transition.
   --> auto  : Auto-transition after saving data.
@@ -42,6 +44,11 @@ FSM diagram::
      [Ready]  --p-->  [Paused]  --p-->  [Resuming (ramp, RAMP_TICKS ticks)]  -->  [Ready]
   During [Paused]: arm re-sends frozen target, hand writes skipped, [s] rejected.
   During [Resuming]: alpha sweeps 1/RAMP_TICKS → 1.0, blending frozen → fresh.
+
+  [q] Quit: ungated. From any state, `q` sets STOP=True (and START=False).
+  The main loop exits on its next tick check; the `finally` block runs
+  cleanup (arms-to-home, image-client close). `q` does NOT auto-save an
+  in-progress recording; if the operator wants to save, press `s` first.
 """
 from __future__ import annotations
 

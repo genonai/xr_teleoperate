@@ -23,6 +23,10 @@ from teleop import fsm
 # Reset every FSM global before each test. Using autouse so the test body
 # never has to remember the boilerplate. Pytest re-runs this for every test;
 # state never leaks between cases even when the module's globals are mutated.
+#
+# IMPORTANT: keep this list in sync with the module-level state globals in
+# teleop/fsm.py. If a new global is added there (a future base-vel state,
+# e.g.), forgetting to reset it here will cause silent leaks across tests.
 @pytest.fixture(autouse=True)
 def _reset_fsm_state():
     fsm.START          = False
@@ -57,6 +61,31 @@ def test_q_sets_stop_true_and_clears_start():
     fsm.on_press('q')
     assert fsm.START is False
     assert fsm.STOP is True
+
+
+def test_q_during_wait_loop_sets_stop_without_start():
+    """Quit-before-start path. Pins the property the entry-point's
+    STOP-gate (added in commit 4926b5c) relies on: pressing `q` while
+    we're still waiting for `r` must produce STOP=True without ever
+    setting START=True. If this regresses, the gate would silently
+    re-spin the motors on quit-before-start."""
+    assert fsm.START is False    # initial state from fixture
+    fsm.on_press('q')
+    assert fsm.STOP is True
+    assert fsm.START is False    # never went True
+
+
+def test_r_after_q_still_sets_start():
+    """Pin an undocumented FSM transition: after `q`, `r` is ungated and
+    still sets START=True. Operationally inert because the main loop has
+    already exited on STOP=True, but pinned here so a future code change
+    that adds a `not STOP` gate to `r` (or doesn't) is a deliberate decision,
+    not a silent drift."""
+    fsm.on_press('q')
+    assert fsm.STOP is True
+    fsm.on_press('r')
+    assert fsm.START is True
+    assert fsm.STOP is True      # STOP stays — `r` does not clear it
 
 
 # ---------------------------------------------------------------------------

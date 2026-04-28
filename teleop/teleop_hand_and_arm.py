@@ -36,7 +36,10 @@ def publish_reset_category(category: int, publisher): # Scene Reset signal
 # RAMP_TICKS / RAMP_DURATION_SEC constants all live in teleop/fsm.py.
 # Reference state via `fsm.NAME` so mutations performed by `on_press`
 # (running on the sshkeyboard listener thread) are visible here.
-# Public callables for sshkeyboard / IPC:
+# Public callables for sshkeyboard / IPC. These aliases are bound once at
+# import time; reassigning them later (e.g. monkey-patching for tests) does
+# NOT change what listen_keyboard already received — the listener holds the
+# original function reference. Patch `fsm.on_press` instead if you need it.
 on_press = fsm.on_press
 get_state = fsm.get_state
 
