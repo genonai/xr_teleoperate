@@ -30,7 +30,7 @@ def test_sport_snapshot_none_fallback():
 # B5: Wireless snapshot None-fallback.
 def test_wireless_snapshot_none_fallback():
     cmd = read_wireless_snapshot([None])
-    assert cmd == [0.0, 0.0, 0.0]
+    assert cmd == (0.0, 0.0, 0.0)
 
 
 # B6: Sport snapshot non-None happy path — components flow into base_achieved
@@ -45,11 +45,13 @@ def test_sport_snapshot_happy_path():
 # B7: Stick-mapping composition with outside-deadband values.
 # Pins: callback stored RAW (not pre-scaled, not pre-deadbanded), and
 # read pipes through r3_stick_to_cmd_vel (sign-flip + scale-after-deadband).
-# With (lx=0.5, ly=0.0, rx=0.0): vx=0, vy=-_apply_deadband(0.5)*SCALE_VY=-0.15, vyaw=0.
+# Outside-deadband single-axis input. Mapping: lx→vy, ly→vx, rx→vyaw,
+# all sign-flipped. With (lx=0.5, ly=0, rx=0): vy = -0.5*SCALE_VY = -0.15;
+# vx = vyaw = 0.
 def test_wireless_snapshot_outside_deadband_composition():
     box = [(0.5, 0.0, 0.0)]
     cmd = read_wireless_snapshot(box)
-    assert cmd == pytest.approx([0.0, -0.5 * SCALE_VY, 0.0])
+    assert cmd == pytest.approx((0.0, -0.5 * SCALE_VY, 0.0))
     # Sanity: the magnitude is non-trivial (not within deadband-zero region).
     assert abs(cmd[1]) > 0.1
 
@@ -74,4 +76,4 @@ def test_wireless_snapshot_freezes_at_last_value_between_callbacks():
     box[0] = (0.5, 0.0, 0.0)
     cmd1 = read_wireless_snapshot(box)
     cmd2 = read_wireless_snapshot(box)
-    assert cmd1 == cmd2 == pytest.approx([0.0, -0.5 * SCALE_VY, 0.0])
+    assert cmd1 == cmd2 == pytest.approx((0.0, -0.5 * SCALE_VY, 0.0))

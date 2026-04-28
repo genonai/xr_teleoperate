@@ -146,16 +146,18 @@ if __name__ == '__main__':
         latest_wireless = [None]   # (lx, ly, rx)
 
         def _sport_cb(msg):
+            # CycloneDDS IDL uint8/float32 fields deliver native Python int/float;
+            # no coercion needed.
             latest_sport[0] = (
-                int(msg.mode),
-                float(msg.velocity[0]),
-                float(msg.velocity[1]),
-                float(msg.velocity[2]),
-                float(msg.yaw_speed),
+                msg.mode,
+                msg.velocity[0],
+                msg.velocity[1],
+                msg.velocity[2],
+                msg.yaw_speed,
             )
 
         def _wireless_cb(msg):
-            latest_wireless[0] = (float(msg.lx), float(msg.ly), float(msg.rx))
+            latest_wireless[0] = (msg.lx, msg.ly, msg.rx)
 
         sport_sub = ChannelSubscriber("rt/sportmodestate", SportModeState_)
         sport_sub.Init(_sport_cb, 1)
@@ -851,7 +853,13 @@ if __name__ == '__main__':
                 sim_state_subscriber.stop_subscribe()
         except Exception as e:
             logger_mp.error(f"Failed to stop sim state subscriber: {e}")
-        
+
+        try:
+            sport_sub.Close()
+            wireless_sub.Close()
+        except Exception as e:
+            logger_mp.error(f"Failed to close base-vel subscribers: {e}")
+
         try:
             if args.record:
                 recorder.close()
