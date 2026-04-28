@@ -422,19 +422,19 @@ if __name__ == '__main__':
             )
             if (args.ee == "dex3" or args.ee == "brainco") and args.input_mode == "hand":
                 apply_pause_ramp(tele_data.left_hand_pos.flatten(), tele_data.right_hand_pos.flatten(),
-                                 _write_hand_arrays, **ramp_kwargs)
+                                 _write_hand_arrays, is_array=True, **ramp_kwargs)
             elif args.ee == "dex1" and args.input_mode == "controller":
                 apply_pause_ramp(tele_data.left_ctrl_triggerValue, tele_data.right_ctrl_triggerValue,
-                                 _write_gripper_values, **ramp_kwargs)
+                                 _write_gripper_values, is_array=False, **ramp_kwargs)
             elif args.ee == "dex1" and args.input_mode == "hand":
                 apply_pause_ramp(tele_data.left_hand_pinchValue, tele_data.right_hand_pinchValue,
-                                 _write_gripper_values, **ramp_kwargs)
+                                 _write_gripper_values, is_array=False, **ramp_kwargs)
             elif (args.ee == "inspire_dfx" or args.ee == "inspire_ftp") and args.input_mode == "hand":
                 apply_pause_ramp(tele_data.left_hand_pos.flatten(), tele_data.right_hand_pos.flatten(),
-                                 _write_hand_arrays, **ramp_kwargs)
+                                 _write_hand_arrays, is_array=True, **ramp_kwargs)
             elif (args.ee == "inspire_dfx" or args.ee == "inspire_ftp") and args.input_mode == "controller":
                 apply_pause_ramp(tele_data.left_ctrl_triggerValue, tele_data.right_ctrl_triggerValue,
-                                 _write_gripper_values, **ramp_kwargs)
+                                 _write_gripper_values, is_array=False, **ramp_kwargs)
             else:
                 pass
             

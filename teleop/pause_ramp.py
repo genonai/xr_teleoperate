@@ -26,6 +26,7 @@ def apply_pause_ramp(
     new_right: Any,
     write_fn: Callable[[Any, Any], None],
     *,
+    is_array: bool,
     entering_pause: bool,
     current_tick_paused: bool,
     alpha: float,
@@ -34,23 +35,19 @@ def apply_pause_ramp(
 ) -> None:
     """Apply the pause/ramp blend to one EE's left/right values.
 
-    Contract: ``new_left`` / ``new_right`` MUST be fresh, non-aliased values
-    each call. At every existing call site they are either freshly-flattened
-    numpy arrays (``tele_data.left_hand_pos.flatten()``) or immutable Python
-    floats — neither aliases anything the caller mutates later. The helper
-    relies on this so it can store references directly without defensive
-    ``.copy()``: every value it persists into ``frozen_snapshot`` or
-    ``last_commanded`` is already a fresh allocation. If a future caller
-    passes a non-fresh array, the saved reference would alias the caller's
-    buffer and silently track later mutations — bugs would manifest as
-    ramp/pause behavior drifting with whatever the caller does to the
-    "fresh" input. Document new call sites accordingly.
-
     Args:
-        new_left, new_right: fresh values from this tick's tele_data.
+        new_left, new_right: fresh values from this tick's tele_data (numpy
+            arrays for hand-pose branches, floats for gripper-trigger
+            branches).
         write_fn: closure ``(out_left, out_right) -> None`` that handles
             the actual shared-memory write (with whatever locks the target
             requires). Called only when not paused.
+        is_array: True if ``new_*`` are numpy arrays (mutable; need
+            ``.copy()`` when stored, otherwise a future caller passing a
+            non-fresh array would silently break C0 continuity — the saved
+            reference would alias the caller's buffer and track every
+            subsequent mutation). False for immutable scalars (Python
+            floats — direct assignment is safe).
         entering_pause: top-of-tick edge; True only on the first paused tick.
             Triggers the snapshot from ``last_commanded`` so the next resume
             blends from the actual last-commanded value (C0 continuity), not
@@ -69,18 +66,27 @@ def apply_pause_ramp(
 
     Returns: ``None``. All side effects flow through ``write_fn`` and the
     two mutable mapping arguments.
+
+    Note on defensive copies: the ``.copy()`` calls when ``is_array=True``
+    are deliberate. Removing them on the grounds that current call sites
+    pass fresh ``.flatten()`` results trades safety for cleanliness — a
+    future swap from ``.flatten()`` to ``.ravel()`` (which can return a
+    view) would silently break C0 continuity with no exception and no log.
+    The ~sub-microsecond cost at 30 Hz on 6–12-element arrays is paid
+    gladly for unconditional defense (asserts can be disabled with -O;
+    .copy() cannot).
     """
     # Snapshot at pause entry — from last_commanded (C0-continuous), not
     # from fresh input. Bootstraps with new_* on the very first tick when
     # last_commanded hasn't been written yet; paused branches skip writes,
     # so the bootstrap value is read but never observable.
-    #
-    # No defensive .copy(): both `last_commanded.get(...)` (set by a prior
-    # tick's `last_commanded[...] = out_left`) and the bootstrap fallback
-    # (`new_left`, fresh per the contract above) are already non-aliased.
     if entering_pause:
-        frozen_snapshot['left']  = last_commanded.get('left',  new_left)
-        frozen_snapshot['right'] = last_commanded.get('right', new_right)
+        if is_array:
+            frozen_snapshot['left']  = last_commanded.get('left',  new_left).copy()
+            frozen_snapshot['right'] = last_commanded.get('right', new_right).copy()
+        else:
+            frozen_snapshot['left']  = last_commanded.get('left',  new_left)
+            frozen_snapshot['right'] = last_commanded.get('right', new_right)
 
     if current_tick_paused:
         # Hand controller continues reading the last value we wrote — leave
@@ -100,8 +106,9 @@ def apply_pause_ramp(
     write_fn(out_left, out_right)
 
     # Track the actually-commanded value for the next pause's snapshot.
-    # No defensive .copy(): out_left/out_right are either fresh from the
-    # call site (alpha=1.0) or freshly allocated by the lerp expression
-    # above (alpha<1.0). Neither aliases anything observed by the caller.
-    last_commanded['left']  = out_left
-    last_commanded['right'] = out_right
+    if is_array:
+        last_commanded['left']  = out_left.copy()
+        last_commanded['right'] = out_right.copy()
+    else:
+        last_commanded['left']  = out_left
+        last_commanded['right'] = out_right
