@@ -111,7 +111,19 @@ if __name__ == '__main__':
     parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='IP address of image server, used by teleimager and televuer')
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
     # mode flags
-    parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
+    g_lower = parser.add_mutually_exclusive_group()
+    g_lower.add_argument('--motion', action='store_true',
+        help='R1+X gamepad path (legacy). Operator must put G1 in Regular mode first.')
+    g_lower.add_argument('--homie', action='store_true',
+        help='HOMIE-managed lower body. run_homie.sh must be running on PC2 before this script.')
+
+    parser.add_argument('--homie-host', default='127.0.0.1')
+    parser.add_argument('--homie-port', type=int, default=7701)
+    parser.add_argument('--physical-ai-expo-root',
+        default=os.environ.get('PHYSICAL_AI_EXPO_ROOT'),
+        help='Path to physical_ai_expo checkout (for posture-patch verification).')
+    parser.add_argument('--skip-posture-check', action='store_true',
+        help='Operator escape hatch — start teleop even if posture patch is missing.')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
@@ -140,6 +152,11 @@ if __name__ == '__main__':
     # at whatever --frequency the operator picked. Without this, RAMP_TICKS=30
     # silently means 0.5 s at 60 Hz or 2.0 s at 15 Hz.
     RAMP_TICKS = max(1, int(round(args.frequency * RAMP_DURATION_SEC)))
+
+    # Pre-declare HOMIE-related state at __main__ scope so the finally block can
+    # reference them even if the try: body bails out before the lower-body branch.
+    gate = None
+    homie_abort = threading.Event()
 
     try:
         # setup dds communication domains id
@@ -204,8 +221,34 @@ if __name__ == '__main__':
                                      webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
                                      )
         
-        # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
-        if args.motion:
+        # Lower-body controller selection: HOMIE / R1+X gamepad / debug mode
+        # (gate and homie_abort are pre-declared at __main__ scope above.)
+        if args.homie:
+            from teleop.utils.homie_client import HomieGate, HomieGateError
+            try:
+                gate = HomieGate(args.homie_host, args.homie_port,
+                                 connect_deadline_s=30.0, connect_interval_s=1.0,
+                                 socket_timeout_s=0.5)
+                gate.connect_with_retry()
+                state = gate.probe_state()
+                gate.verify_posture_patch(args.physical_ai_expo_root, state,
+                                           skip_check=args.skip_posture_check)
+                gate.calibrate_if_needed(state)
+                gate.start_watchdog(
+                    period_s=1.0, fail_threshold=3,
+                    on_abort=lambda: (
+                        logger_mp.error("🛑 HOMIE WATCHDOG TRIPPED — stopping teleop"),
+                        homie_abort.set()))
+                logger_mp.info(f"HOMIE ready (calibrated={state.calibrated}, "
+                                f"controller_running={state.controller_running})")
+            except HomieGateError as e:
+                logger_mp.error(f"HOMIE pre-flight failed: {e}")
+                if gate is not None:
+                    gate.close()
+                sys.exit(4)
+            # NOTE: skip Enter_Debug_Mode (HOMIE owns lower body)
+            # and LocoClientWrapper (no Unitree AI/loco controller running).
+        elif args.motion:
             if args.input_mode == "controller":
                 loco_wrapper = LocoClientWrapper()
         else:
@@ -214,15 +257,18 @@ if __name__ == '__main__':
             logger_mp.info(f"Enter debug mode: {'Success' if status == 0 else 'Failed'}")
 
         # arm
+        # motion_mode=True for both --motion (R1+X) and --homie:
+        # rt/arm_sdk weight=1 wins over AI controller (R1+X) and HOMIE (release mode).
+        _use_arm_sdk = args.motion or args.homie
         if args.arm == "G1_29":
             arm_ik = G1_29_ArmIK()
-            arm_ctrl = G1_29_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+            arm_ctrl = G1_29_ArmController(motion_mode=_use_arm_sdk, simulation_mode=args.sim)
         elif args.arm == "G1_23":
             arm_ik = G1_23_ArmIK()
-            arm_ctrl = G1_23_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+            arm_ctrl = G1_23_ArmController(motion_mode=_use_arm_sdk, simulation_mode=args.sim)
         elif args.arm == "H1_2":
             arm_ik = H1_2_ArmIK()
-            arm_ctrl = H1_2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+            arm_ctrl = H1_2_ArmController(motion_mode=_use_arm_sdk, simulation_mode=args.sim)
         elif args.arm == "H1":
             arm_ik = H1_ArmIK()
             arm_ctrl = H1_ArmController(simulation_mode=args.sim)
@@ -405,6 +451,9 @@ if __name__ == '__main__':
         last_commanded_hand     = {}     # keyed 'left'/'right' — last value we wrote to shared mem
         # main loop. robot start to follow VR user's motion
         while not STOP:
+            if homie_abort.is_set():
+                logger_mp.error("HOMIE-abort flagged; exiting teleop main loop")
+                break
             start_time = time.time()
 
             # --- Pause/ramp top-of-tick block -----------------------------------------
@@ -843,10 +892,15 @@ if __name__ == '__main__':
         import traceback
         logger_mp.error(traceback.format_exc())
     finally:
-        try:
-            arm_ctrl.ctrl_dual_arm_go_home()
-        except Exception as e:
-            logger_mp.error(f"Failed to ctrl_dual_arm_go_home: {e}")
+        if not homie_abort.is_set():
+            try:
+                arm_ctrl.ctrl_dual_arm_go_home()
+            except Exception as e:
+                logger_mp.error(f"Failed to ctrl_dual_arm_go_home: {e}")
+        else:
+            logger_mp.warning(
+                "Skipping ctrl_dual_arm_go_home — HOMIE-abort active. "
+                "Arms hold last commanded pose; do NOT publish into a falling robot.")
         
         try:
             if args.ipc:
@@ -892,5 +946,11 @@ if __name__ == '__main__':
                 recorder.close()
         except Exception as e:
             logger_mp.error(f"Failed to close recorder: {e}")
+
+        if gate is not None:
+            try:
+                gate.stop()       # zero velocity to HOMIE — best effort
+            finally:
+                gate.close()
         logger_mp.info("✅ Finally, exiting program.")
         exit(0)
