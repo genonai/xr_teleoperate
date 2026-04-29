@@ -79,6 +79,7 @@ class HomieGate:
         self._wd_thread: Optional[threading.Thread] = None
         self._wd_stop = threading.Event()
         self._wd_fired = False
+        self.connect_attempts = 0
 
     def connect_with_retry(self) -> None:
         deadline = time.monotonic() + self.connect_deadline_s
@@ -92,6 +93,7 @@ class HomieGate:
                 sock.settimeout(self.socket_timeout_s)
                 self._sock = sock
                 self._buf = b""
+                self.connect_attempts = attempts
                 if attempts > 0:
                     logger.info("HOMIE connection ready after %d attempt(s)",
                                 attempts + 1)
@@ -104,6 +106,7 @@ class HomieGate:
                                 self.host, self.port)
                     logged_waiting = True
                 time.sleep(self.connect_interval_s)
+        self.connect_attempts = attempts
         raise HomieGateError(
             f"Could not connect to HOMIE on {self.host}:{self.port} "
             f"within {self.connect_deadline_s}s deadline "
