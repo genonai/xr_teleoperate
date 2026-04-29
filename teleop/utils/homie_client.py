@@ -1,7 +1,7 @@
 # GENERATED — do not edit. Sync: tools/sync_homie_client.sh
 # Source of truth: scripts/real_eval/homie_eval_gate.py
 """HomieGate — TCP-JSON client for `homie_process_test.py` with pre-flight
-liveness, posture-patch verification, conditional calibration, and a
+liveness, conditional calibration, height-command helper, and a
 poll-based watchdog. Stdlib only.
 
 Spec: docs/superpowers/specs/2026-04-28-homie-eval-teleop-design.md
@@ -9,13 +9,11 @@ Spec: docs/superpowers/specs/2026-04-28-homie-eval-teleop-design.md
 from __future__ import annotations
 import json
 import logging
-import re
 import socket
 import sys
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -27,8 +25,7 @@ class HomieState:
 
     `calibrated`, `controller_running`, `nominal_height`, `final_goal` are
     populated by the post-`feat/status-rpc-fields` HOMIE; on older HOMIEs
-    they are None and the gate falls back to regex source-file checks +
-    assume-not-calibrated.
+    they are None and the gate assumes not-calibrated.
     """
     vx: float = 0.0
     vy: float = 0.0
@@ -63,8 +60,9 @@ class HomieGateError(Exception):
 
 
 class HomieGate:
-    """TCP-JSON client for `homie_process_test.py` with retry, posture
-    verification, conditional calibration, and a poll-based watchdog."""
+    """TCP-JSON client for `homie_process_test.py` with retry,
+    conditional calibration, height-command helper, and a poll-based
+    watchdog."""
 
     def __init__(self, host: str, port: int,
                  connect_deadline_s: float = 30.0,
@@ -137,80 +135,6 @@ class HomieGate:
         if not reply.get("ok"):
             raise HomieGateError(f"HOMIE status returned not-ok: {reply}")
         return HomieState.from_status_reply(reply)
-
-    # Regex matchers — load-bearing literals from apply_homie_r1x_patch.py
-    _RE_PATCHED_HEIGHT_INIT = re.compile(r"command\[3\]\s*=\s*0\.68\b")
-    _RE_PATCHED_HEIGHT_GET = re.compile(r"cmd_height\s*=\s*0\.68\s*-\s*0\.40")
-    _RE_PATCHED_GOAL_FIRST = re.compile(r"-?0\.2616\b")
-    _RE_PATCHED_GOAL_KNEE = re.compile(r"\b0\.5027\b")
-
-    def verify_posture_patch(self, expo_root: str, state: HomieState,
-                              skip_check: bool = False) -> None:
-        """Verify the R1+X posture patch is applied. Prefer enriched status
-        fields (post upstream PR); fall back to regex source-file checks.
-
-        Raises HomieGateError with the apply-script hint on failure.
-
-        If skip_check=True, logs a warning and returns without checking —
-        operator escape hatch for the rare case where they accept the risk.
-        """
-        if skip_check:
-            logger.warning("posture patch verification SKIPPED via "
-                           "--skip-posture-check — operator accepts risk of "
-                           "table scrape if patch is missing.")
-            return
-        if state.has_enriched_fields():
-            self._verify_via_status(state)
-            return
-        if not expo_root:
-            raise HomieGateError(
-                "physical_ai_expo root not provided — pass --physical-ai-expo-root "
-                "or set PHYSICAL_AI_EXPO_ROOT, or use --skip-posture-check.")
-        self._verify_via_regex(expo_root)
-
-    def _verify_via_regex(self, expo_root: str) -> None:
-        utils = (Path(expo_root) / "physical_ai_expo" / "third_party"
-                 / "g1_gym_deploy" / "utils")
-        cheetah = utils / "cheetah_state_estimator.py"
-        deploy = utils / "deployment_runner.py"
-        problems = []
-        if not cheetah.exists():
-            problems.append(f"missing {cheetah}")
-        else:
-            txt = cheetah.read_text()
-            if not self._RE_PATCHED_HEIGHT_INIT.search(txt):
-                problems.append(f"cheetah_state_estimator.py: command[3]=0.68 not found")
-            if not self._RE_PATCHED_HEIGHT_GET.search(txt):
-                problems.append(f"cheetah_state_estimator.py: cmd_height=0.68 not found")
-        if not deploy.exists():
-            problems.append(f"missing {deploy}")
-        else:
-            txt = deploy.read_text()
-            if not self._RE_PATCHED_GOAL_FIRST.search(txt):
-                problems.append(f"deployment_runner.py: R1+X final_goal[0]=-0.2616 not found")
-            if not self._RE_PATCHED_GOAL_KNEE.search(txt):
-                problems.append(f"deployment_runner.py: R1+X final_goal knee=0.5027 not found")
-        if problems:
-            raise HomieGateError(
-                "HOMIE posture patch missing or out of date:\n  - "
-                + "\n  - ".join(problems)
-                + f"\n\nFix:\n  python scripts/real_eval/apply_homie_r1x_patch.py "
-                + f"{expo_root} --apply\n\nThen restart `run_homie.sh` in Terminal A.")
-
-    def _verify_via_status(self, state: HomieState) -> None:
-        problems = []
-        if state.nominal_height is not None and abs(state.nominal_height - 0.68) > 1e-3:
-            problems.append(f"nominal_height={state.nominal_height} (expected 0.68)")
-        if state.final_goal is not None and len(state.final_goal) >= 4:
-            if abs(state.final_goal[0] - (-0.2616)) > 1e-3:
-                problems.append(f"final_goal[0]={state.final_goal[0]} (expected -0.2616)")
-            if abs(state.final_goal[3] - 0.5027) > 1e-3:
-                problems.append(f"final_goal[3]={state.final_goal[3]} (expected 0.5027)")
-        if problems:
-            raise HomieGateError(
-                "HOMIE running with un-patched posture (per status RPC):\n  - "
-                + "\n  - ".join(problems)
-                + "\n\nApply the patch in physical_ai_expo and restart run_homie.sh.")
 
     CALIBRATE_GAP_S = 2.0  # gap between the two calibrate pulses (per HomieClient default)
 
@@ -288,6 +212,24 @@ class HomieGate:
             logger.warning("HomieGate.stop() best-effort failed: %s", e)
         except Exception as e:
             logger.warning("HomieGate.stop() unexpected error: %s", e)
+
+    def set_height(self, height: float) -> None:
+        """Send a height command to HOMIE via the set_velocity protocol.
+
+        Robot stays stationary (vx=vy=yaw=0); only the height target changes.
+        HOMIE was trained on a varying height input (right-stick maps to
+        ~0.34m–1.14m around stock nominal 0.74m), so values within that range
+        stay inside the trained distribution.
+
+        This is the supported way to lower the standing pose for table
+        clearance, *replacing* the source-patch approach (which was unsound
+        because HOMIE's behavior is determined by training, not source
+        constants).
+        """
+        with self._sock_lock:
+            self._send_recv({"cmd": "set_velocity",
+                             "vx": 0.0, "vy": 0.0, "yaw": 0.0,
+                             "height": float(height), "duration": 0.0})
 
     def close(self) -> None:
         # Stop watchdog first so it doesn't race with socket close

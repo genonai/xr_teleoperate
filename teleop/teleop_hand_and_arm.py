@@ -119,11 +119,10 @@ if __name__ == '__main__':
 
     parser.add_argument('--homie-host', default='127.0.0.1')
     parser.add_argument('--homie-port', type=int, default=7701)
-    parser.add_argument('--physical-ai-expo-root',
-        default=os.environ.get('PHYSICAL_AI_EXPO_ROOT'),
-        help='Path to physical_ai_expo checkout (for posture-patch verification).')
-    parser.add_argument('--skip-posture-check', action='store_true',
-        help='Operator escape hatch — start teleop even if posture patch is missing.')
+    parser.add_argument('--homie-height', type=float, default=None,
+        help="If set, request HOMIE to stand at this height (meters) via "
+             "set_velocity height field after calibration. Default: HOMIE's "
+             "stock nominal height (0.74m). Useful for table clearance.")
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
@@ -231,9 +230,11 @@ if __name__ == '__main__':
                                  socket_timeout_s=0.5)
                 gate.connect_with_retry()
                 state = gate.probe_state()
-                gate.verify_posture_patch(args.physical_ai_expo_root, state,
-                                           skip_check=args.skip_posture_check)
                 gate.calibrate_if_needed(state)
+                if args.homie_height is not None:
+                    logger_mp.info(f"Setting HOMIE standing height to "
+                                    f"{args.homie_height:.3f}m via set_velocity")
+                    gate.set_height(args.homie_height)
                 gate.start_watchdog(
                     period_s=1.0, fail_threshold=3,
                     on_abort=lambda: (
