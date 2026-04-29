@@ -51,9 +51,6 @@ class HomieState:
             final_goal=reply.get("final_goal"),
         )
 
-    def has_enriched_fields(self) -> bool:
-        return self.calibrated is not None and self.nominal_height is not None
-
 
 class HomieGateError(Exception):
     """Raised on connect/probe/calibrate failures."""
