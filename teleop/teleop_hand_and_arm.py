@@ -353,20 +353,24 @@ if __name__ == '__main__':
                         simulation_mode=args.sim)
             else:
                 # Full 6DOF hand tracking mode (existing code)
-                if args.homie:
-                    # 75D keypoint → 6D motor mapping happens inside
-                    # Inspire_Controller_{DFX,FTP}'s control loop and is
-                    # tightly coupled to direct-Modbus output. HomieHandController
-                    # accepts only 6D motor arrays (or 1D scalar) on its inputs,
-                    # so the keypoint adapter is out of scope for this commit.
-                    # Fail loudly rather than silently grinding via the legacy
-                    # direct-Modbus path under HOMIE.
+                if args.homie and args.ee == "inspire_dfx":
+                    # DFX variant publishes to rt/inspire/cmd (MotorCmds_ IDL),
+                    # a different topic from the FTP rt/inspire_hand/ctrl/{l,r}
+                    # path. Whether anything subscribes to rt/inspire/cmd under
+                    # HOMIE is unverified — could go nowhere. Block for safety
+                    # until DFX-on-HOMIE is tested end-to-end.
                     raise NotImplementedError(
-                        "--homie + --input-mode=hand + Inspire EE not supported yet. "
-                        "Use --input-mode=controller (1DOF grip) or implement a HOMIE "
-                        "keypoint→6D motor adapter that publishes via DDS "
-                        "rt/inspire_hand/ctrl/{l,r}."
+                        "--homie + --input-mode=hand + --ee=inspire_dfx not yet "
+                        "verified. DFX publishes to rt/inspire/cmd which may not "
+                        "have a HOMIE-compatible downstream listener. Use "
+                        "--ee=inspire_ftp instead."
                     )
+                # FTP variant publishes DDS to rt/inspire_hand/ctrl/{l,r} (see
+                # robot_hand_inspire.py lines 156-159, 177-180), which is the
+                # exact topic Headless_driver_double (started by run_homie.sh)
+                # subscribes to and writes Modbus from. No double-Modbus
+                # collision; the existing keypoint→6D retargeting + DDS-publish
+                # path is already canonical-safe under HOMIE.
                 if args.ee == "inspire_dfx":
                     from teleop.robot_control.robot_hand_inspire import Inspire_Controller_DFX
                     left_hand_pos_array = Array('d', 75, lock = True)
