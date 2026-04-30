@@ -258,21 +258,49 @@ if __name__ == '__main__':
             logger_mp.info(f"Enter debug mode: {'Success' if status == 0 else 'Failed'}")
 
         # arm
-        # motion_mode=True for both --motion (R1+X) and --homie:
-        # rt/arm_sdk weight=1 wins over AI controller (R1+X) and HOMIE (release mode).
-        _use_arm_sdk = args.motion or args.homie
-        if args.arm == "G1_29":
-            arm_ik = G1_29_ArmIK()
-            arm_ctrl = G1_29_ArmController(motion_mode=_use_arm_sdk, simulation_mode=args.sim)
-        elif args.arm == "G1_23":
-            arm_ik = G1_23_ArmIK()
-            arm_ctrl = G1_23_ArmController(motion_mode=_use_arm_sdk, simulation_mode=args.sim)
-        elif args.arm == "H1_2":
-            arm_ik = H1_2_ArmIK()
-            arm_ctrl = H1_2_ArmController(motion_mode=_use_arm_sdk, simulation_mode=args.sim)
-        elif args.arm == "H1":
-            arm_ik = H1_ArmIK()
-            arm_ctrl = H1_ArmController(simulation_mode=args.sim)
+        # Under --motion (R1+X gamepad) we publish to DDS rt/arm_sdk with
+        # weight=1 (motion_mode=True) so our writes win over the AI controller.
+        # Under --homie we instead route through LCM arm_action — g1_control
+        # merges leg torques (from HOMIE) and arm positions (from us) into a
+        # single rt/lowcmd output. Writing rt/arm_sdk under HOMIE-release-mode
+        # has NO arbiter (no AI controller running), so it grinds against
+        # HOMIE's lowcmd writes at the lowcmd level. This mirrors the
+        # IL_PhysicalAI eval-side fix (commit 1fda045b on
+        # feat/pi05-pickhold-v03).
+        _use_arm_sdk = args.motion  # --homie no longer touches rt/arm_sdk
+        homie_lcm_handle = None     # kept alive for the lifetime of the process
+        if args.homie:
+            import lcm as _lcm
+            from physical_ai_expo.motion.capture_playback import LCM_URL
+            from teleop.utils.homie_io import HomieArmController
+            homie_lcm_handle = _lcm.LCM(LCM_URL)
+            if args.arm == "G1_29":
+                arm_ik = G1_29_ArmIK()
+                arm_ctrl = HomieArmController(lc=homie_lcm_handle, lerp_sec=0.15)
+                logger_mp.info(
+                    "HOMIE release mode: arm_ctrl rerouted via LCM arm_action "
+                    "(was DDS rt/arm_sdk via G1_29_ArmController)")
+            else:
+                # HomieArmController is G1_29-only (matches eval-side path).
+                # Other arms under --homie are unsupported here; fail loudly
+                # rather than silently grinding via the legacy DDS path.
+                raise NotImplementedError(
+                    f"--homie currently supports --arm=G1_29 only; got {args.arm!r}. "
+                    "Add a HomieArmController variant before enabling other arms."
+                )
+        else:
+            if args.arm == "G1_29":
+                arm_ik = G1_29_ArmIK()
+                arm_ctrl = G1_29_ArmController(motion_mode=_use_arm_sdk, simulation_mode=args.sim)
+            elif args.arm == "G1_23":
+                arm_ik = G1_23_ArmIK()
+                arm_ctrl = G1_23_ArmController(motion_mode=_use_arm_sdk, simulation_mode=args.sim)
+            elif args.arm == "H1_2":
+                arm_ik = H1_2_ArmIK()
+                arm_ctrl = H1_2_ArmController(motion_mode=_use_arm_sdk, simulation_mode=args.sim)
+            elif args.arm == "H1":
+                arm_ik = H1_ArmIK()
+                arm_ctrl = H1_ArmController(simulation_mode=args.sim)
 
         # end-effector
         if args.ee == "dex3":
@@ -296,19 +324,49 @@ if __name__ == '__main__':
         elif args.ee == "inspire_dfx" or args.ee == "inspire_ftp":
             if args.input_mode == "controller":
                 # 1DOF mode: controller trigger → single grip value
-                from teleop.robot_control.robot_hand_inspire import Inspire_1DOF_Controller
                 left_gripper_value = Value('d', 10.0, lock=True)         # [input] init OPEN (safety)
                 right_gripper_value = Value('d', 10.0, lock=True)        # [input] init OPEN (safety)
                 dual_gripper_data_lock = Lock()
                 dual_gripper_state_array = Array('d', 2, lock=False)     # [output] [left_state, right_state]
                 dual_gripper_action_array = Array('d', 2, lock=False)    # [output] [left_action, right_action]
-                gripper_ctrl = Inspire_1DOF_Controller(
-                    left_gripper_value, right_gripper_value, dual_gripper_data_lock,
-                    dual_gripper_state_array, dual_gripper_action_array,
-                    protocol="dfx" if args.ee == "inspire_dfx" else "ftp",
-                    simulation_mode=args.sim)
+                if args.homie:
+                    # Under HOMIE release mode, route hand commands via DDS
+                    # rt/inspire_hand/ctrl/{l,r}; Headless_driver_double
+                    # subscribes and owns Modbus. Direct Modbus from
+                    # Inspire_1DOF_Controller would collide with that driver
+                    # (two RS485 masters → grinding). Mirrors eval-side fix.
+                    from teleop.utils.homie_io import HomieHandController
+                    gripper_ctrl = HomieHandController(
+                        left_gripper_value, right_gripper_value, dual_gripper_data_lock,
+                        dual_gripper_state_array, dual_gripper_action_array,
+                        simulation_mode=args.sim, fps=30, mode="1dof")
+                    logger_mp.info(
+                        "HOMIE release mode: gripper_ctrl rerouted via DDS "
+                        "rt/inspire_hand/ctrl (was direct Modbus via "
+                        "Inspire_1DOF_Controller)")
+                else:
+                    from teleop.robot_control.robot_hand_inspire import Inspire_1DOF_Controller
+                    gripper_ctrl = Inspire_1DOF_Controller(
+                        left_gripper_value, right_gripper_value, dual_gripper_data_lock,
+                        dual_gripper_state_array, dual_gripper_action_array,
+                        protocol="dfx" if args.ee == "inspire_dfx" else "ftp",
+                        simulation_mode=args.sim)
             else:
                 # Full 6DOF hand tracking mode (existing code)
+                if args.homie:
+                    # 75D keypoint → 6D motor mapping happens inside
+                    # Inspire_Controller_{DFX,FTP}'s control loop and is
+                    # tightly coupled to direct-Modbus output. HomieHandController
+                    # accepts only 6D motor arrays (or 1D scalar) on its inputs,
+                    # so the keypoint adapter is out of scope for this commit.
+                    # Fail loudly rather than silently grinding via the legacy
+                    # direct-Modbus path under HOMIE.
+                    raise NotImplementedError(
+                        "--homie + --input-mode=hand + Inspire EE not supported yet. "
+                        "Use --input-mode=controller (1DOF grip) or implement a HOMIE "
+                        "keypoint→6D motor adapter that publishes via DDS "
+                        "rt/inspire_hand/ctrl/{l,r}."
+                    )
                 if args.ee == "inspire_dfx":
                     from teleop.robot_control.robot_hand_inspire import Inspire_Controller_DFX
                     left_hand_pos_array = Array('d', 75, lock = True)
