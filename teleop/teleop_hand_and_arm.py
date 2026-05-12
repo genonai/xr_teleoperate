@@ -157,6 +157,7 @@ if __name__ == '__main__':
     gate = None
     homie_abort = threading.Event()
 
+    recorder = None  # pre-declared so finally can reference safely
     try:
         # setup dds communication domains id
         if args.sim:
@@ -426,6 +427,7 @@ if __name__ == '__main__':
             sim_state_subscriber = start_sim_state_subscribe()
 
         # record + headless / non-headless mode
+        recorder = None  # default so teardown can probe safely if init aborts mid-block
         if args.record:
             _writer_task_dir = os.path.join(args.task_dir, args.task_name)
             _writer_kwargs = dict(
@@ -450,11 +452,12 @@ if __name__ == '__main__':
                         "--writer=json."
                     )
                 _shape = tuple(_hc.get('image_shape', ()) or ())
-                if _shape and _shape != (640, 480):
+                # YAMLs and downstream slicing all use (height, width) = (480, 640).
+                if _shape and _shape != (480, 640):
                     raise SystemExit(
                         f"--writer=lerobot expects head camera image_shape "
-                        f"(640, 480); got {_shape}. Reconfigure the head camera "
-                        f"or use --writer=json."
+                        f"(480, 640) [height, width]; got {_shape}. Reconfigure "
+                        f"the head camera or use --writer=json."
                     )
                 if args.arm != 'G1_29':
                     raise SystemExit(
@@ -503,15 +506,21 @@ if __name__ == '__main__':
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
-        # Pause/ramp tick-local state (initialized once; mutated each tick below)
+        # Pause/ramp tick-local state (initialized once; mutated each tick below).
+        # Seed the arm blend so the first tracking tick after [r] slews from the
+        # current measured arm pose to the VR-IK target over RAMP_TICKS — same
+        # smooth re-engagement as [p]→resume, applied to the initial start so
+        # the arm doesn't snap to the VR target at full rate.
+        _bootstrap_q            = arm_ctrl.get_current_dual_arm_q().copy()
         prev_paused             = False
-        ramp_remaining          = 0
-        frozen_sol_q            = None   # arm q captured at pause entry (blend-from)
-        frozen_sol_tauff        = None
+        ramp_remaining          = RAMP_TICKS    # first tick → leaving-pause-style blend
+        frozen_sol_q            = _bootstrap_q
+        frozen_sol_tauff        = _bootstrap_q * 0.0   # zeros, matches dtype/shape
         last_commanded_q        = None   # arm q commanded at end of the previous tick
         last_commanded_tauff    = None
         frozen_hand_snapshot    = {}     # keyed 'left'/'right' — value type matches EE branch
         last_commanded_hand     = {}     # keyed 'left'/'right' — last value we wrote to shared mem
+        logger_mp.info(f"▶ Initial tracking — ramping to VR pose over {RAMP_TICKS/args.frequency:.1f}s.")
         # main loop. robot start to follow VR user's motion
         while not STOP:
             if homie_abort.is_set():
@@ -592,7 +601,7 @@ if __name__ == '__main__':
                 if current_tick_paused:
                     pass   # Do not overwrite — hand controller reads last values
                 else:
-                    if alpha < 1.0:
+                    if alpha < 1.0 and 'left' in frozen_hand_snapshot:
                         f_left  = frozen_hand_snapshot['left']
                         f_right = frozen_hand_snapshot['right']
                         out_left  = f_left  + alpha * (new_left  - f_left)
@@ -614,7 +623,7 @@ if __name__ == '__main__':
                 if current_tick_paused:
                     pass   # Do not overwrite — hand controller reads last values
                 else:
-                    if alpha < 1.0:
+                    if alpha < 1.0 and 'left' in frozen_hand_snapshot:
                         f_left  = frozen_hand_snapshot['left']
                         f_right = frozen_hand_snapshot['right']
                         out_left  = f_left  + alpha * (new_left  - f_left)
@@ -636,7 +645,7 @@ if __name__ == '__main__':
                 if current_tick_paused:
                     pass   # Do not overwrite — hand controller reads last values
                 else:
-                    if alpha < 1.0:
+                    if alpha < 1.0 and 'left' in frozen_hand_snapshot:
                         f_left  = frozen_hand_snapshot['left']
                         f_right = frozen_hand_snapshot['right']
                         out_left  = f_left  + alpha * (new_left  - f_left)
@@ -658,7 +667,7 @@ if __name__ == '__main__':
                 if current_tick_paused:
                     pass   # Do not overwrite — hand controller reads last values
                 else:
-                    if alpha < 1.0:
+                    if alpha < 1.0 and 'left' in frozen_hand_snapshot:
                         f_left  = frozen_hand_snapshot['left']
                         f_right = frozen_hand_snapshot['right']
                         out_left  = f_left  + alpha * (new_left  - f_left)
@@ -680,7 +689,7 @@ if __name__ == '__main__':
                 if current_tick_paused:
                     pass   # Do not overwrite — hand controller reads last values
                 else:
-                    if alpha < 1.0:
+                    if alpha < 1.0 and 'left' in frozen_hand_snapshot:
                         f_left  = frozen_hand_snapshot['left']
                         f_right = frozen_hand_snapshot['right']
                         out_left  = f_left  + alpha * (new_left  - f_left)
@@ -836,7 +845,7 @@ if __name__ == '__main__':
                                 logger_mp.warning("Right wrist image is None!")
                     else:
                         if head_img is not None:
-                            colors[f"color_{0}"] = head_img
+                            colors[f"color_{0}"] = head_img.bgr
                         else:
                             logger_mp.warning("Head image is None!")
                         if camera_config['left_wrist_camera']['enable_zmq']:
@@ -951,6 +960,10 @@ if __name__ == '__main__':
 
     except KeyboardInterrupt:
         logger_mp.info("⛔ KeyboardInterrupt, exiting program...")
+    except SystemExit as e:
+        # SystemExit isn't an Exception — log it explicitly so startup-guard
+        # bailouts (writer schema, etc.) don't disappear into the finally block.
+        logger_mp.error(f"⛔ SystemExit raised during startup/runtime: {e}")
     except Exception:
         import traceback
         logger_mp.error(traceback.format_exc())
@@ -1005,7 +1018,7 @@ if __name__ == '__main__':
             logger_mp.error(f"Failed to close base-vel subscribers: {e}")
 
         try:
-            if args.record:
+            if args.record and recorder is not None:
                 recorder.close()
         except Exception as e:
             logger_mp.error(f"Failed to close recorder: {e}")

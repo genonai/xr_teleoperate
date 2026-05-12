@@ -284,29 +284,29 @@ class G1_29_ArmIK:
             if self.Visualization:
                 self.vis.display(sol_q)  # for visualization
 
+            # Cache last-good output for the failure-mode freeze (see except).
+            self._last_good_sol_q = sol_q.copy()
+            self._last_good_sol_tauff = sol_tauff.copy()
             return sol_q, sol_tauff
-        
+
         except Exception as e:
-            logger_mp.error(f"ERROR in convergence, plotting debug info.{e}")
+            # Solver diverged (typical when the wrist target crosses the
+            # opposite side of the torso → outside the kinematic envelope).
+            # FREEZE on the last good IK output. Do NOT:
+            #   - feed the debug pose into smooth_filter (poisons future ticks)
+            #   - overwrite init_data (poisons warm-start of next solve)
+            #   - return current_lr_arm_motor_q (commands "stay here", which
+            #     gravity-drifts under HOMIE since target_tauff is dropped)
+            logger_mp.error(f"ERROR in convergence: {e}")
+            logger_mp.error(f"motorstate:\n{current_lr_arm_motor_q}\nleft_pose:\n{left_wrist}\nright_pose:\n{right_wrist}")
 
-            sol_q = self.opti.debug.value(self.var_q)
-            self.smooth_filter.add_data(sol_q)
-            sol_q = self.smooth_filter.filtered_data
+            last_q = getattr(self, "_last_good_sol_q", None)
+            last_tauff = getattr(self, "_last_good_sol_tauff", None)
+            if last_q is not None and last_tauff is not None:
+                return last_q.copy(), last_tauff.copy()
 
-            if current_lr_arm_motor_dq is not None:
-                v = current_lr_arm_motor_dq * 0.0
-            else:
-                v = (sol_q - self.init_data) * 0.0
-
-            self.init_data = sol_q
-
-            sol_tauff = pin.rnea(self.reduced_robot.model, self.reduced_robot.data, sol_q, v, np.zeros(self.reduced_robot.model.nv))
-
-            logger_mp.error(f"sol_q:{sol_q} \nmotorstate: \n{current_lr_arm_motor_q} \nleft_pose: \n{left_wrist} \nright_pose: \n{right_wrist}")
-            if self.Visualization:
-                self.vis.display(sol_q)  # for visualization
-
-            # return sol_q, sol_tauff
+            # Cold-start fallback: no good solve yet. Return measured pose
+            # with zero feedforward — equivalent to the prior behaviour.
             return current_lr_arm_motor_q, np.zeros(self.reduced_robot.model.nv)
         
 class G1_23_ArmIK:
@@ -563,29 +563,29 @@ class G1_23_ArmIK:
             if self.Visualization:
                 self.vis.display(sol_q)  # for visualization
 
+            # Cache last-good output for the failure-mode freeze (see except).
+            self._last_good_sol_q = sol_q.copy()
+            self._last_good_sol_tauff = sol_tauff.copy()
             return sol_q, sol_tauff
-        
+
         except Exception as e:
-            logger_mp.error(f"ERROR in convergence, plotting debug info.{e}")
+            # Solver diverged (typical when the wrist target crosses the
+            # opposite side of the torso → outside the kinematic envelope).
+            # FREEZE on the last good IK output. Do NOT:
+            #   - feed the debug pose into smooth_filter (poisons future ticks)
+            #   - overwrite init_data (poisons warm-start of next solve)
+            #   - return current_lr_arm_motor_q (commands "stay here", which
+            #     gravity-drifts under HOMIE since target_tauff is dropped)
+            logger_mp.error(f"ERROR in convergence: {e}")
+            logger_mp.error(f"motorstate:\n{current_lr_arm_motor_q}\nleft_pose:\n{left_wrist}\nright_pose:\n{right_wrist}")
 
-            sol_q = self.opti.debug.value(self.var_q)
-            self.smooth_filter.add_data(sol_q)
-            sol_q = self.smooth_filter.filtered_data
+            last_q = getattr(self, "_last_good_sol_q", None)
+            last_tauff = getattr(self, "_last_good_sol_tauff", None)
+            if last_q is not None and last_tauff is not None:
+                return last_q.copy(), last_tauff.copy()
 
-            if current_lr_arm_motor_dq is not None:
-                v = current_lr_arm_motor_dq * 0.0
-            else:
-                v = (sol_q - self.init_data) * 0.0
-
-            self.init_data = sol_q
-
-            sol_tauff = pin.rnea(self.reduced_robot.model, self.reduced_robot.data, sol_q, v, np.zeros(self.reduced_robot.model.nv))
-
-            logger_mp.error(f"sol_q:{sol_q} \nmotorstate: \n{current_lr_arm_motor_q} \nleft_pose: \n{left_wrist} \nright_pose: \n{right_wrist}")
-            if self.Visualization:
-                self.vis.display(sol_q)  # for visualization
-
-            # return sol_q, sol_tauff
+            # Cold-start fallback: no good solve yet. Return measured pose
+            # with zero feedforward — equivalent to the prior behaviour.
             return current_lr_arm_motor_q, np.zeros(self.reduced_robot.model.nv)
 
 
@@ -867,29 +867,29 @@ class H1_2_ArmIK:
             if self.Visualization:
                 self.vis.display(sol_q)  # for visualization
 
+            # Cache last-good output for the failure-mode freeze (see except).
+            self._last_good_sol_q = sol_q.copy()
+            self._last_good_sol_tauff = sol_tauff.copy()
             return sol_q, sol_tauff
-        
+
         except Exception as e:
-            logger_mp.error(f"ERROR in convergence, plotting debug info.{e}")
+            # Solver diverged (typical when the wrist target crosses the
+            # opposite side of the torso → outside the kinematic envelope).
+            # FREEZE on the last good IK output. Do NOT:
+            #   - feed the debug pose into smooth_filter (poisons future ticks)
+            #   - overwrite init_data (poisons warm-start of next solve)
+            #   - return current_lr_arm_motor_q (commands "stay here", which
+            #     gravity-drifts under HOMIE since target_tauff is dropped)
+            logger_mp.error(f"ERROR in convergence: {e}")
+            logger_mp.error(f"motorstate:\n{current_lr_arm_motor_q}\nleft_pose:\n{left_wrist}\nright_pose:\n{right_wrist}")
 
-            sol_q = self.opti.debug.value(self.var_q)
-            self.smooth_filter.add_data(sol_q)
-            sol_q = self.smooth_filter.filtered_data
+            last_q = getattr(self, "_last_good_sol_q", None)
+            last_tauff = getattr(self, "_last_good_sol_tauff", None)
+            if last_q is not None and last_tauff is not None:
+                return last_q.copy(), last_tauff.copy()
 
-            if current_lr_arm_motor_dq is not None:
-                v = current_lr_arm_motor_dq * 0.0
-            else:
-                v = (sol_q - self.init_data) * 0.0
-
-            self.init_data = sol_q
-
-            sol_tauff = pin.rnea(self.reduced_robot.model, self.reduced_robot.data, sol_q, v, np.zeros(self.reduced_robot.model.nv))
-
-            logger_mp.error(f"sol_q:{sol_q} \nmotorstate: \n{current_lr_arm_motor_q} \nleft_pose: \n{left_wrist} \nright_pose: \n{right_wrist}")
-            if self.Visualization:
-                self.vis.display(sol_q)  # for visualization
-
-            # return sol_q, sol_tauff
+            # Cold-start fallback: no good solve yet. Return measured pose
+            # with zero feedforward — equivalent to the prior behaviour.
             return current_lr_arm_motor_q, np.zeros(self.reduced_robot.model.nv)
 
 class H1_ArmIK:
@@ -1174,29 +1174,29 @@ class H1_ArmIK:
             if self.Visualization:
                 self.vis.display(sol_q)  # for visualization
 
+            # Cache last-good output for the failure-mode freeze (see except).
+            self._last_good_sol_q = sol_q.copy()
+            self._last_good_sol_tauff = sol_tauff.copy()
             return sol_q, sol_tauff
-        
+
         except Exception as e:
-            logger_mp.error(f"ERROR in convergence, plotting debug info.{e}")
+            # Solver diverged (typical when the wrist target crosses the
+            # opposite side of the torso → outside the kinematic envelope).
+            # FREEZE on the last good IK output. Do NOT:
+            #   - feed the debug pose into smooth_filter (poisons future ticks)
+            #   - overwrite init_data (poisons warm-start of next solve)
+            #   - return current_lr_arm_motor_q (commands "stay here", which
+            #     gravity-drifts under HOMIE since target_tauff is dropped)
+            logger_mp.error(f"ERROR in convergence: {e}")
+            logger_mp.error(f"motorstate:\n{current_lr_arm_motor_q}\nleft_pose:\n{left_wrist}\nright_pose:\n{right_wrist}")
 
-            sol_q = self.opti.debug.value(self.var_q)
-            self.smooth_filter.add_data(sol_q)
-            sol_q = self.smooth_filter.filtered_data
+            last_q = getattr(self, "_last_good_sol_q", None)
+            last_tauff = getattr(self, "_last_good_sol_tauff", None)
+            if last_q is not None and last_tauff is not None:
+                return last_q.copy(), last_tauff.copy()
 
-            if current_lr_arm_motor_dq is not None:
-                v = current_lr_arm_motor_dq * 0.0
-            else:
-                v = (sol_q - self.init_data) * 0.0
-
-            self.init_data = sol_q
-
-            sol_tauff = pin.rnea(self.reduced_robot.model, self.reduced_robot.data, sol_q, v, np.zeros(self.reduced_robot.model.nv))
-
-            logger_mp.error(f"sol_q:{sol_q} \nmotorstate: \n{current_lr_arm_motor_q} \nleft_pose: \n{left_wrist} \nright_pose: \n{right_wrist}")
-            if self.Visualization:
-                self.vis.display(sol_q)  # for visualization
-
-            # return sol_q, sol_tauff
+            # Cold-start fallback: no good solve yet. Return measured pose
+            # with zero feedforward — equivalent to the prior behaviour.
             return current_lr_arm_motor_q, np.zeros(self.reduced_robot.model.nv)
         
 if __name__ == "__main__":
